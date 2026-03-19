@@ -1,15 +1,13 @@
 /**
  * scanner.js — Roblox Badge Scanner
- * Сканирует каждые 5 сек в течение 4.5 минут.
- * Когда время выходит — триггерит новый запуск через GitHub API (через ~10 сек).
+ * Запускается GitHub Actions каждые 5 минут.
+ * Внутри сканирует каждые 5 сек в течение 4.5 минут.
  * Останавливается только когда найдено больше 0 ачивок.
  */
 
-const USER_ID    = process.env.ROBLOX_USER_ID;
-const CF_KV_URL  = process.env.CF_KV_URL;
-const CF_TOKEN   = process.env.CF_TOKEN;
-const GH_TOKEN   = process.env.GH_TOKEN;    // GitHub Personal Access Token
-const GH_REPO    = process.env.GH_REPO;     // формат: owner/repo  например: 1DrStrange1/roblox-scanner
+const USER_ID   = process.env.ROBLOX_USER_ID;
+const CF_KV_URL = process.env.CF_KV_URL;
+const CF_TOKEN  = process.env.CF_TOKEN;
 
 const ROBLOX_BADGES_API = "https://badges.roblox.com/v1/users";
 const ROBLOX_USERS_API  = "https://users.roblox.com/v1/users";
@@ -36,13 +34,13 @@ async function main() {
   while (Date.now() - startTime < MAX_RUNTIME_MS) {
     attempt++;
     const elapsed = Math.round((Date.now() - startTime) / 1000);
-    console.log(`\n🔄 Попытка #${attempt} (прошло ${elapsed}с)`);
+    console.log(`🔄 Попытка #${attempt} (прошло ${elapsed}с)`);
 
     const result = await attemptFetch(USER_ID);
 
     if (result.success && result.badges.length > 0) {
       console.log(`✅ Найдено ${result.badges.length} ачивок для ${result.username}`);
-      console.log(`📅 Запрашиваю даты получения для сортировки...`);
+      console.log(`📅 Запрашиваю даты для сортировки...`);
 
       const awardedDates = await fetchAwardedDates(USER_ID, result.badges.map(b => b.id));
       result.badges.sort((a, b) => {
@@ -79,52 +77,16 @@ async function main() {
       status:    "scanning",
       attempt,
       updatedAt: new Date().toISOString(),
-      userId:    USER_ID,
-      runner:    "github-actions"
+      userId:    USER_ID
     });
 
     await sleep(RETRY_INTERVAL_MS);
   }
 
-  // Время вышло — запускаем себя заново через GitHub API
-  console.log(`\n⏰ Время вышло. Запускаю новый workflow через GitHub API...`);
-  await triggerNewRun();
+  console.log(`⏰ Время вышло. Следующий запуск через ~30 секунд по cron.`);
   process.exit(0);
 }
 
-// ─── Триггер нового запуска через GitHub API ──────────────────────────────────
-async function triggerNewRun() {
-  if (!GH_TOKEN || !GH_REPO) {
-    console.log("⚠️ GH_TOKEN или GH_REPO не заданы — жди следующего cron через 5 минут.");
-    return;
-  }
-
-  // Ждём 10 секунд перед перезапуском
-  await sleep(10000);
-
-  try {
-    const resp = await fetch(`https://api.github.com/repos/${GH_REPO}/actions/workflows/scan.yml/dispatches`, {
-      method:  "POST",
-      headers: {
-        Authorization:  `Bearer ${GH_TOKEN}`,
-        Accept:         "application/vnd.github+json",
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ ref: "main" })
-    });
-
-    if (resp.ok || resp.status === 204) {
-      console.log("🚀 Новый запуск успешно запущен! Продолжаю сканировать...");
-    } else {
-      const err = await resp.text();
-      console.log(`⚠️ Не удалось запустить: ${resp.status} ${err}`);
-    }
-  } catch (err) {
-    console.log(`⚠️ Ошибка при запуске: ${err}`);
-  }
-}
-
-// ─── Roblox API ───────────────────────────────────────────────────────────────
 async function attemptFetch(userId) {
   try {
     const userResp = await fetch(`${ROBLOX_USERS_API}/${userId}`, {
@@ -187,7 +149,6 @@ async function fetchAwardedDates(userId, badgeIds) {
   return dates;
 }
 
-// ─── KV ──────────────────────────────────────────────────────────────────────
 async function kvGet(key) {
   try {
     const resp = await fetch(`${CF_KV_URL}/values/${encodeURIComponent(key)}`, {
