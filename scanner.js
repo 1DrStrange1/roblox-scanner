@@ -2,19 +2,18 @@
  * scanner.js — Roblox Badge Scanner
  * Запускается GitHub Actions каждые 5 минут.
  * Внутри одного запуска долбит API каждые 5 секунд ~4.5 минуты.
- * Как только инвентарь открылся — сохраняет в Cloudflare KV и останавливается.
+ * Останавливается только когда найдено БОЛЬШЕ 0 ачивок.
  */
 
-const USER_ID   = process.env.ROBLOX_USER_ID;   // задаётся в GitHub Secrets
-const CF_KV_URL = process.env.CF_KV_URL;         // URL Cloudflare KV API
-const CF_TOKEN  = process.env.CF_TOKEN;           // Cloudflare API Token
+const USER_ID   = process.env.ROBLOX_USER_ID;
+const CF_KV_URL = process.env.CF_KV_URL;
+const CF_TOKEN  = process.env.CF_TOKEN;
 
 const ROBLOX_BADGES_API = "https://badges.roblox.com/v1/users";
 const ROBLOX_USERS_API  = "https://users.roblox.com/v1/users";
-const RETRY_INTERVAL_MS = 5000;   // 5 секунд между попытками
-const MAX_RUNTIME_MS    = 270000; // 4.5 минуты — чуть меньше лимита Actions
+const RETRY_INTERVAL_MS = 5000;
+const MAX_RUNTIME_MS    = 270000; // 4.5 минуты
 
-// ─── Главная функция ──────────────────────────────────────────────────────────
 async function main() {
   if (!USER_ID || !CF_KV_URL || !CF_TOKEN) {
     console.error("❌ Не заданы переменные окружения. Проверь GitHub Secrets.");
@@ -24,11 +23,14 @@ async function main() {
   console.log(`🎮 Сканирую игрока: ${USER_ID}`);
   console.log(`⏱  Буду пробовать ${MAX_RUNTIME_MS / 1000} секунд`);
 
-  // Проверяем — может уже есть данные в KV?
+  // Проверяем — есть ли уже данные с ачивками в KV?
   const existing = await kvGet(`badges:${USER_ID}`);
-  if (existing && existing.status === "done") {
+  if (existing && existing.status === "done" && existing.badges.length > 0) {
     console.log(`✅ Данные уже есть в KV (${existing.badges.length} ачивок). Выходим.`);
     process.exit(0);
+  }
+  if (existing && existing.status === "done" && existing.badges.length === 0) {
+    console.log(`⚠️ В KV сохранено 0 ачивок — продолжаю сканировать пока не появятся.`);
   }
 
   const startTime = Date.now();
@@ -41,7 +43,8 @@ async function main() {
 
     const result = await attemptFetch(USER_ID);
 
-    if (result.success) {
+    // Успех — нашли ачивки
+    if (result.success && result.badges.length > 0) {
       console.log(`✅ Успех! Найдено ${result.badges.length} ачивок для ${result.username}`);
 
       await kvPut(`badges:${USER_ID}`, {
@@ -51,22 +54,26 @@ async function main() {
         username:  result.username,
         badges:    result.badges
       });
-
-      // Удаляем статус задачи если был
       await kvDelete(`task:${USER_ID}`);
 
       console.log("💾 Данные сохранены в Cloudflare KV навсегда.");
       process.exit(0);
     }
 
+    // Игрок не найден
     if (result.reason === "user_not_found") {
       console.error(`❌ Игрок ${USER_ID} не найден. Проверь ID.`);
       process.exit(1);
     }
 
-    console.log(`⏳ Инвентарь закрыт (${result.reason}). Жду 5 секунд...`);
+    // Инвентарь открыт но 0 ачивок — продолжаем
+    if (result.success && result.badges.length === 0) {
+      console.log(`⏳ Инвентарь открыт но ачивок 0. Жду 5 секунд...`);
+    } else {
+      console.log(`⏳ Инвентарь закрыт (${result.reason}). Жду 5 секунд...`);
+    }
 
-    // Обновляем статус в KV чтобы Worker мог показывать прогресс
+    // Обновляем статус в KV
     await kvPut(`task:${USER_ID}`, {
       status:    "scanning",
       attempt,
@@ -78,14 +85,12 @@ async function main() {
     await sleep(RETRY_INTERVAL_MS);
   }
 
-  console.log(`\n⏰ Время вышло (${MAX_RUNTIME_MS / 1000}с). GitHub Actions запустит заново через 5 минут.`);
+  console.log(`\n⏰ Время вышло. GitHub Actions запустит заново через 5 минут.`);
   process.exit(0);
 }
 
-// ─── Roblox API ───────────────────────────────────────────────────────────────
 async function attemptFetch(userId) {
   try {
-    // Получаем имя пользователя
     const userResp = await fetch(`${ROBLOX_USERS_API}/${userId}`, {
       headers: { Accept: "application/json" }
     });
@@ -93,7 +98,6 @@ async function attemptFetch(userId) {
     if (!userResp.ok)           return { success: false, reason: `user_${userResp.status}` };
     const { name: username } = await userResp.json();
 
-    // Получаем бейджи с пагинацией
     const badges = [];
     let cursor = "", pages = 0;
 
@@ -128,17 +132,13 @@ async function attemptFetch(userId) {
   }
 }
 
-// ─── Cloudflare KV API ────────────────────────────────────────────────────────
-// CF_KV_URL формат: https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/storage/kv/namespaces/NAMESPACE_ID
-
 async function kvGet(key) {
   try {
     const resp = await fetch(`${CF_KV_URL}/values/${encodeURIComponent(key)}`, {
       headers: { Authorization: `Bearer ${CF_TOKEN}` }
     });
     if (!resp.ok) return null;
-    const text = await resp.text();
-    return JSON.parse(text);
+    return JSON.parse(await resp.text());
   } catch {
     return null;
   }
@@ -148,16 +148,10 @@ async function kvPut(key, value) {
   try {
     const resp = await fetch(`${CF_KV_URL}/values/${encodeURIComponent(key)}`, {
       method:  "PUT",
-      headers: {
-        Authorization:  `Bearer ${CF_TOKEN}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(value)
+      headers: { Authorization: `Bearer ${CF_TOKEN}`, "Content-Type": "application/json" },
+      body:    JSON.stringify(value)
     });
-    if (!resp.ok) {
-      const err = await resp.text();
-      console.error(`KV PUT error: ${err}`);
-    }
+    if (!resp.ok) console.error(`KV PUT error: ${await resp.text()}`);
   } catch (err) {
     console.error(`KV PUT exception: ${err}`);
   }
@@ -176,7 +170,6 @@ function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 
-// ─── Старт ───────────────────────────────────────────────────────────────────
 main().catch(err => {
   console.error("💥 Неожиданная ошибка:", err);
   process.exit(1);
