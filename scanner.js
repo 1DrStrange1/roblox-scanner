@@ -1,7 +1,7 @@
 /**
  * scanner.js — Roblox Badge Scanner
  * Запускается GitHub Actions каждые 5 минут.
- * Сохраняет дату когда игрок ПОЛУЧИЛ ачивку (не дату создания).
+ * Сортирует ачивки от новых к старым по дате получения.
  * Останавливается только когда найдено больше 0 ачивок.
  */
 
@@ -12,7 +12,7 @@ const CF_TOKEN  = process.env.CF_TOKEN;
 const ROBLOX_BADGES_API = "https://badges.roblox.com/v1/users";
 const ROBLOX_USERS_API  = "https://users.roblox.com/v1/users";
 const RETRY_INTERVAL_MS = 5000;
-const MAX_RUNTIME_MS    = 270000; // 4.5 минуты
+const MAX_RUNTIME_MS    = 270000;
 
 async function main() {
   if (!USER_ID || !CF_KV_URL || !CF_TOKEN) {
@@ -21,15 +21,11 @@ async function main() {
   }
 
   console.log(`🎮 Сканирую игрока: ${USER_ID}`);
-  console.log(`⏱  Буду пробовать ${MAX_RUNTIME_MS / 1000} секунд`);
 
   const existing = await kvGet(`badges:${USER_ID}`);
   if (existing?.status === "done" && existing.badges.length > 0) {
-    console.log(`✅ Данные уже есть в KV (${existing.badges.length} ачивок). Выходим.`);
+    console.log(`✅ Данные уже есть (${existing.badges.length} ачивок). Выходим.`);
     process.exit(0);
-  }
-  if (existing?.status === "done" && existing.badges.length === 0) {
-    console.log(`⚠️ В KV сохранено 0 ачивок — продолжаю сканировать.`);
   }
 
   const startTime = Date.now();
@@ -44,12 +40,16 @@ async function main() {
 
     if (result.success && result.badges.length > 0) {
       console.log(`✅ Найдено ${result.badges.length} ачивок для ${result.username}`);
-      console.log(`📅 Запрашиваю даты получения ачивок...`);
+      console.log(`📅 Запрашиваю даты получения для сортировки...`);
 
-      // Получаем даты когда игрок получил каждую ачивку
+      // Получаем даты получения — только для сортировки, показывать не будем
       const awardedDates = await fetchAwardedDates(USER_ID, result.badges.map(b => b.id));
-      result.badges.forEach(b => {
-        b.awardedAt = awardedDates[b.id] || null;
+
+      // Сортируем от новых к старым
+      result.badges.sort((a, b) => {
+        const da = awardedDates[a.id] ? new Date(awardedDates[a.id]) : new Date(0);
+        const db = awardedDates[b.id] ? new Date(awardedDates[b.id]) : new Date(0);
+        return db - da; // новые сначала
       });
 
       console.log(`💾 Сохраняю в Cloudflare KV...`);
@@ -67,7 +67,7 @@ async function main() {
     }
 
     if (result.reason === "user_not_found") {
-      console.error(`❌ Игрок ${USER_ID} не найден. Проверь ID.`);
+      console.error(`❌ Игрок ${USER_ID} не найден.`);
       process.exit(1);
     }
 
@@ -92,7 +92,6 @@ async function main() {
   process.exit(0);
 }
 
-// ─── Получить список ачивок ───────────────────────────────────────────────────
 async function attemptFetch(userId) {
   try {
     const userResp = await fetch(`${ROBLOX_USERS_API}/${userId}`, {
@@ -117,15 +116,11 @@ async function attemptFetch(userId) {
 
       const page = await resp.json();
       for (const b of (page.data || [])) {
-        const gameId   = b.awarder?.id   || null;
-        const gameName = b.awarder?.name || null;
         badges.push({
           id:          b.id,
           name:        b.name,
-          description: b.description || "",
-          awardedAt:   null, // заполним отдельным запросом
-          gameId,
-          gameName
+          gameId:      b.awarder?.id   || null,
+          gameName:    b.awarder?.name || null
         });
       }
       cursor = page.nextPageCursor || "";
@@ -138,36 +133,29 @@ async function attemptFetch(userId) {
   }
 }
 
-// ─── Получить даты ПОЛУЧЕНИЯ ачивок игроком (батчами по 100) ─────────────────
 async function fetchAwardedDates(userId, badgeIds) {
   const dates = {};
   const BATCH = 100;
 
   for (let i = 0; i < badgeIds.length; i += BATCH) {
     const chunk = badgeIds.slice(i, i + BATCH);
-    const ids   = chunk.join(",");
     try {
       const resp = await fetch(
-        `${ROBLOX_BADGES_API}/${userId}/badges/awarded-dates?badgeIds=${ids}`,
+        `${ROBLOX_BADGES_API}/${userId}/badges/awarded-dates?badgeIds=${chunk.join(",")}`,
         { headers: { Accept: "application/json" } }
       );
       if (!resp.ok) continue;
       const data = await resp.json();
       for (const item of (data.data || [])) {
-        // awardedDate — это дата когда именно этот игрок получил ачивку
         dates[item.badgeId] = item.awardedDate || null;
       }
-    } catch {
-      // если батч не удался — пропускаем, даты останутся null
-    }
-    // небольшая пауза чтобы не получить rate limit
+    } catch {}
     if (i + BATCH < badgeIds.length) await sleep(200);
   }
 
   return dates;
 }
 
-// ─── KV ──────────────────────────────────────────────────────────────────────
 async function kvGet(key) {
   try {
     const resp = await fetch(`${CF_KV_URL}/values/${encodeURIComponent(key)}`, {
