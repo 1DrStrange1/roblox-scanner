@@ -1,18 +1,20 @@
 /**
  * scanner.js — Roblox Badge Scanner
- * Запускается GitHub Actions каждые 5 минут.
- * Сортирует ачивки от новых к старым по дате получения.
+ * Сканирует каждые 5 сек в течение 4.5 минут.
+ * Когда время выходит — триггерит новый запуск через GitHub API (через ~10 сек).
  * Останавливается только когда найдено больше 0 ачивок.
  */
 
-const USER_ID   = process.env.ROBLOX_USER_ID;
-const CF_KV_URL = process.env.CF_KV_URL;
-const CF_TOKEN  = process.env.CF_TOKEN;
+const USER_ID    = process.env.ROBLOX_USER_ID;
+const CF_KV_URL  = process.env.CF_KV_URL;
+const CF_TOKEN   = process.env.CF_TOKEN;
+const GH_TOKEN   = process.env.GH_TOKEN;    // GitHub Personal Access Token
+const GH_REPO    = process.env.GH_REPO;     // формат: owner/repo  например: 1DrStrange1/roblox-scanner
 
 const ROBLOX_BADGES_API = "https://badges.roblox.com/v1/users";
 const ROBLOX_USERS_API  = "https://users.roblox.com/v1/users";
 const RETRY_INTERVAL_MS = 5000;
-const MAX_RUNTIME_MS    = 270000;
+const MAX_RUNTIME_MS    = 270000; // 4.5 минуты
 
 async function main() {
   if (!USER_ID || !CF_KV_URL || !CF_TOKEN) {
@@ -42,17 +44,13 @@ async function main() {
       console.log(`✅ Найдено ${result.badges.length} ачивок для ${result.username}`);
       console.log(`📅 Запрашиваю даты получения для сортировки...`);
 
-      // Получаем даты получения — только для сортировки, показывать не будем
       const awardedDates = await fetchAwardedDates(USER_ID, result.badges.map(b => b.id));
-
-      // Сортируем от новых к старым
       result.badges.sort((a, b) => {
         const da = awardedDates[a.id] ? new Date(awardedDates[a.id]) : new Date(0);
         const db = awardedDates[b.id] ? new Date(awardedDates[b.id]) : new Date(0);
-        return db - da; // новые сначала
+        return db - da;
       });
 
-      console.log(`💾 Сохраняю в Cloudflare KV...`);
       await kvPut(`badges:${USER_ID}`, {
         status:    "done",
         scannedAt: new Date().toISOString(),
@@ -88,10 +86,45 @@ async function main() {
     await sleep(RETRY_INTERVAL_MS);
   }
 
-  console.log(`\n⏰ Время вышло. GitHub Actions запустит заново через 5 минут.`);
+  // Время вышло — запускаем себя заново через GitHub API
+  console.log(`\n⏰ Время вышло. Запускаю новый workflow через GitHub API...`);
+  await triggerNewRun();
   process.exit(0);
 }
 
+// ─── Триггер нового запуска через GitHub API ──────────────────────────────────
+async function triggerNewRun() {
+  if (!GH_TOKEN || !GH_REPO) {
+    console.log("⚠️ GH_TOKEN или GH_REPO не заданы — жди следующего cron через 5 минут.");
+    return;
+  }
+
+  // Ждём 10 секунд перед перезапуском
+  await sleep(10000);
+
+  try {
+    const resp = await fetch(`https://api.github.com/repos/${GH_REPO}/actions/workflows/scan.yml/dispatches`, {
+      method:  "POST",
+      headers: {
+        Authorization:  `Bearer ${GH_TOKEN}`,
+        Accept:         "application/vnd.github+json",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ ref: "main" })
+    });
+
+    if (resp.ok || resp.status === 204) {
+      console.log("🚀 Новый запуск успешно запущен! Продолжаю сканировать...");
+    } else {
+      const err = await resp.text();
+      console.log(`⚠️ Не удалось запустить: ${resp.status} ${err}`);
+    }
+  } catch (err) {
+    console.log(`⚠️ Ошибка при запуске: ${err}`);
+  }
+}
+
+// ─── Roblox API ───────────────────────────────────────────────────────────────
 async function attemptFetch(userId) {
   try {
     const userResp = await fetch(`${ROBLOX_USERS_API}/${userId}`, {
@@ -117,10 +150,10 @@ async function attemptFetch(userId) {
       const page = await resp.json();
       for (const b of (page.data || [])) {
         badges.push({
-          id:          b.id,
-          name:        b.name,
-          gameId:      b.awarder?.id   || null,
-          gameName:    b.awarder?.name || null
+          id:       b.id,
+          name:     b.name,
+          gameId:   b.awarder?.id   || null,
+          gameName: b.awarder?.name || null
         });
       }
       cursor = page.nextPageCursor || "";
@@ -136,7 +169,6 @@ async function attemptFetch(userId) {
 async function fetchAwardedDates(userId, badgeIds) {
   const dates = {};
   const BATCH = 100;
-
   for (let i = 0; i < badgeIds.length; i += BATCH) {
     const chunk = badgeIds.slice(i, i + BATCH);
     try {
@@ -152,10 +184,10 @@ async function fetchAwardedDates(userId, badgeIds) {
     } catch {}
     if (i + BATCH < badgeIds.length) await sleep(200);
   }
-
   return dates;
 }
 
+// ─── KV ──────────────────────────────────────────────────────────────────────
 async function kvGet(key) {
   try {
     const resp = await fetch(`${CF_KV_URL}/values/${encodeURIComponent(key)}`, {
