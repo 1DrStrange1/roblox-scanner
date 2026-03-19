@@ -1,0 +1,49 @@
+name: Roblox Badge Scanner
+
+on:
+  schedule:
+    # Запускается каждые 5 минут — минимальный интервал GitHub Actions
+    - cron: '*/5 * * * *'
+  # Также можно запустить вручную кнопкой в GitHub
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Проверяем — нужно ли сканировать
+        id: check
+        env:
+          CF_KV_URL: ${{ secrets.CF_KV_URL }}
+          CF_TOKEN:  ${{ secrets.CF_TOKEN }}
+          ROBLOX_USER_ID: ${{ secrets.ROBLOX_USER_ID }}
+        run: |
+          # Если уже есть данные в KV — пропускаем запуск
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer $CF_TOKEN" \
+            "$CF_KV_URL/values/badges%3A$ROBLOX_USER_ID")
+          if [ "$STATUS" = "200" ]; then
+            echo "done=true" >> $GITHUB_OUTPUT
+            echo "✅ Данные уже есть в KV, пропускаем сканирование"
+          else
+            echo "done=false" >> $GITHUB_OUTPUT
+            echo "🔄 Данных нет, запускаем сканирование"
+          fi
+
+      - name: Запуск сканера
+        if: steps.check.outputs.done == 'false'
+        env:
+          ROBLOX_USER_ID: ${{ secrets.ROBLOX_USER_ID }}
+          CF_KV_URL:      ${{ secrets.CF_KV_URL }}
+          CF_TOKEN:       ${{ secrets.CF_TOKEN }}
+        run: node scanner.js
