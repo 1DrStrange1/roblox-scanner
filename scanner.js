@@ -1,18 +1,18 @@
 /**
  * scanner.js — Roblox Badge Scanner
  * Запускается GitHub Actions каждые 5 минут.
- * Останавливается только когда найдено БОЛЬШЕ 0 ачивок.
+ * Сохраняет gameId и gameName для каждой ачивки.
+ * Останавливается только когда найдено больше 0 ачивок.
  */
 
 const USER_ID   = process.env.ROBLOX_USER_ID;
 const CF_KV_URL = process.env.CF_KV_URL;
 const CF_TOKEN  = process.env.CF_TOKEN;
 
-const ROBLOX_BADGES_API  = "https://badges.roblox.com/v1/users";
-const ROBLOX_USERS_API   = "https://users.roblox.com/v1/users";
-const ROBLOX_THUMBS_API  = "https://thumbnails.roblox.com/v1/users/avatar-headshot";
-const RETRY_INTERVAL_MS  = 5000;
-const MAX_RUNTIME_MS     = 270000; // 4.5 минуты
+const ROBLOX_BADGES_API = "https://badges.roblox.com/v1/users";
+const ROBLOX_USERS_API  = "https://users.roblox.com/v1/users";
+const RETRY_INTERVAL_MS = 5000;
+const MAX_RUNTIME_MS    = 270000; // 4.5 минуты
 
 async function main() {
   if (!USER_ID || !CF_KV_URL || !CF_TOKEN) {
@@ -21,15 +21,16 @@ async function main() {
   }
 
   console.log(`🎮 Сканирую игрока: ${USER_ID}`);
+  console.log(`⏱  Буду пробовать ${MAX_RUNTIME_MS / 1000} секунд`);
 
-  // Уже есть ачивки в KV?
+  // Есть ли уже данные с ачивками?
   const existing = await kvGet(`badges:${USER_ID}`);
-  if (existing && existing.status === "done" && existing.badges.length > 0) {
-    console.log(`✅ Уже есть ${existing.badges.length} ачивок в KV. Выходим.`);
+  if (existing?.status === "done" && existing.badges.length > 0) {
+    console.log(`✅ Данные уже есть в KV (${existing.badges.length} ачивок). Выходим.`);
     process.exit(0);
   }
-  if (existing && existing.status === "done" && existing.badges.length === 0) {
-    console.log(`⚠️ В KV 0 ачивок — продолжаю сканировать.`);
+  if (existing?.status === "done" && existing.badges.length === 0) {
+    console.log(`⚠️ В KV сохранено 0 ачивок — продолжаю сканировать.`);
   }
 
   const startTime = Date.now();
@@ -42,29 +43,14 @@ async function main() {
 
     const result = await attemptFetch(USER_ID);
 
-    // Успех — нашли ачивки
     if (result.success && result.badges.length > 0) {
-      console.log(`✅ Найдено ${result.badges.length} ачивок для ${result.username}`);
-
-      // Получаем аватар игрока
-      let avatarUrl = null;
-      try {
-        const thumbResp = await fetch(
-          `${ROBLOX_THUMBS_API}?userIds=${USER_ID}&size=150x150&format=Png`,
-          { headers: { Accept: "application/json" } }
-        );
-        if (thumbResp.ok) {
-          const thumbData = await thumbResp.json();
-          avatarUrl = thumbData?.data?.[0]?.imageUrl || null;
-        }
-      } catch {}
+      console.log(`✅ Успех! Найдено ${result.badges.length} ачивок для ${result.username}`);
 
       await kvPut(`badges:${USER_ID}`, {
         status:    "done",
         scannedAt: new Date().toISOString(),
         userId:    USER_ID,
         username:  result.username,
-        avatarUrl,
         badges:    result.badges
       });
       await kvDelete(`task:${USER_ID}`);
@@ -73,14 +59,13 @@ async function main() {
       process.exit(0);
     }
 
-    // Игрок не найден
     if (result.reason === "user_not_found") {
-      console.error(`❌ Игрок ${USER_ID} не найден.`);
+      console.error(`❌ Игрок ${USER_ID} не найден. Проверь ID.`);
       process.exit(1);
     }
 
     if (result.success && result.badges.length === 0) {
-      console.log(`⏳ Инвентарь открыт но 0 ачивок. Жду 5 секунд...`);
+      console.log(`⏳ Инвентарь открыт но ачивок 0. Жду 5 секунд...`);
     } else {
       console.log(`⏳ Инвентарь закрыт (${result.reason}). Жду 5 секунд...`);
     }
@@ -124,17 +109,17 @@ async function attemptFetch(userId) {
 
       const page = await resp.json();
       for (const b of (page.data || [])) {
-        // rootPlaceId из awardingUniverse — ссылка на игру
-        const placeId = b.awardingUniverse?.rootPlaceId || null;
+        // awarder содержит игру где выдана ачивка
+        const gameId   = b.awarder?.id   || null;
+        const gameName = b.awarder?.name || null;
+
         badges.push({
           id:          b.id,
           name:        b.name,
           description: b.description || "",
-          imageUrl:    b.displayIconImageUrl || null,
-          awardedAt:   b.created || null,
-          enabled:     b.enabled,
-          gameName:    b.awardingUniverse?.name || null,
-          gameUrl:     placeId ? `https://www.roblox.com/games/${placeId}` : null
+          awardedAt:   b.created     || null,
+          gameId,
+          gameName
         });
       }
       cursor = page.nextPageCursor || "";
@@ -180,6 +165,6 @@ async function kvDelete(key) {
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 main().catch(err => {
-  console.error("💥 Ошибка:", err);
+  console.error("💥 Неожиданная ошибка:", err);
   process.exit(1);
 });
