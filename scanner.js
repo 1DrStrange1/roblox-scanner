@@ -1,7 +1,7 @@
 /**
  * scanner.js — Roblox Badge Scanner
  * Запускается GitHub Actions каждые 5 минут.
- * Сохраняет gameId и gameName для каждой ачивки.
+ * Сохраняет дату когда игрок ПОЛУЧИЛ ачивку (не дату создания).
  * Останавливается только когда найдено больше 0 ачивок.
  */
 
@@ -23,7 +23,6 @@ async function main() {
   console.log(`🎮 Сканирую игрока: ${USER_ID}`);
   console.log(`⏱  Буду пробовать ${MAX_RUNTIME_MS / 1000} секунд`);
 
-  // Есть ли уже данные с ачивками?
   const existing = await kvGet(`badges:${USER_ID}`);
   if (existing?.status === "done" && existing.badges.length > 0) {
     console.log(`✅ Данные уже есть в KV (${existing.badges.length} ачивок). Выходим.`);
@@ -44,8 +43,16 @@ async function main() {
     const result = await attemptFetch(USER_ID);
 
     if (result.success && result.badges.length > 0) {
-      console.log(`✅ Успех! Найдено ${result.badges.length} ачивок для ${result.username}`);
+      console.log(`✅ Найдено ${result.badges.length} ачивок для ${result.username}`);
+      console.log(`📅 Запрашиваю даты получения ачивок...`);
 
+      // Получаем даты когда игрок получил каждую ачивку
+      const awardedDates = await fetchAwardedDates(USER_ID, result.badges.map(b => b.id));
+      result.badges.forEach(b => {
+        b.awardedAt = awardedDates[b.id] || null;
+      });
+
+      console.log(`💾 Сохраняю в Cloudflare KV...`);
       await kvPut(`badges:${USER_ID}`, {
         status:    "done",
         scannedAt: new Date().toISOString(),
@@ -55,7 +62,7 @@ async function main() {
       });
       await kvDelete(`task:${USER_ID}`);
 
-      console.log("💾 Данные сохранены в Cloudflare KV навсегда.");
+      console.log("✅ Данные сохранены навсегда.");
       process.exit(0);
     }
 
@@ -85,6 +92,7 @@ async function main() {
   process.exit(0);
 }
 
+// ─── Получить список ачивок ───────────────────────────────────────────────────
 async function attemptFetch(userId) {
   try {
     const userResp = await fetch(`${ROBLOX_USERS_API}/${userId}`, {
@@ -109,15 +117,13 @@ async function attemptFetch(userId) {
 
       const page = await resp.json();
       for (const b of (page.data || [])) {
-        // awarder содержит игру где выдана ачивка
         const gameId   = b.awarder?.id   || null;
         const gameName = b.awarder?.name || null;
-
         badges.push({
           id:          b.id,
           name:        b.name,
           description: b.description || "",
-          awardedAt:   b.created     || null,
+          awardedAt:   null, // заполним отдельным запросом
           gameId,
           gameName
         });
@@ -132,6 +138,36 @@ async function attemptFetch(userId) {
   }
 }
 
+// ─── Получить даты ПОЛУЧЕНИЯ ачивок игроком (батчами по 100) ─────────────────
+async function fetchAwardedDates(userId, badgeIds) {
+  const dates = {};
+  const BATCH = 100;
+
+  for (let i = 0; i < badgeIds.length; i += BATCH) {
+    const chunk = badgeIds.slice(i, i + BATCH);
+    const ids   = chunk.join(",");
+    try {
+      const resp = await fetch(
+        `${ROBLOX_BADGES_API}/${userId}/badges/awarded-dates?badgeIds=${ids}`,
+        { headers: { Accept: "application/json" } }
+      );
+      if (!resp.ok) continue;
+      const data = await resp.json();
+      for (const item of (data.data || [])) {
+        // awardedDate — это дата когда именно этот игрок получил ачивку
+        dates[item.badgeId] = item.awardedDate || null;
+      }
+    } catch {
+      // если батч не удался — пропускаем, даты останутся null
+    }
+    // небольшая пауза чтобы не получить rate limit
+    if (i + BATCH < badgeIds.length) await sleep(200);
+  }
+
+  return dates;
+}
+
+// ─── KV ──────────────────────────────────────────────────────────────────────
 async function kvGet(key) {
   try {
     const resp = await fetch(`${CF_KV_URL}/values/${encodeURIComponent(key)}`, {
