@@ -40,23 +40,7 @@ async function main() {
 
     if (result.success && result.badges.length > 0) {
       console.log(`✅ Найдено ${result.badges.length} ачивок для ${result.username}`);
-      console.log(`📅 Запрашиваю даты для сортировки...`);
 
-      const awardedDates = await fetchAwardedDates(USER_ID, result.badges.map(b => b.id));
-      const datesCount = Object.values(awardedDates).filter(d => d !== null).length;
-      console.log(`📅 Получено дат: ${datesCount} из ${result.badges.length}`);
-      result.badges.sort((a, b) => {
-        const da = awardedDates[a.id] ? new Date(awardedDates[a.id]).getTime() : null;
-        const db = awardedDates[b.id] ? new Date(awardedDates[b.id]).getTime() : null;
-
-        // Оба есть — сортируем по дате (новые сначала)
-        if (da && db) return db - da;
-        // Только у одного есть дата — тот у кого есть идёт раньше
-        if (da && !db) return -1;
-        if (!da && db) return 1;
-        // У обоих нет даты — сортируем по ID (больший = новее)
-        return b.id - a.id;
-      });
 
       await kvPut(`badges:${USER_ID}`, {
         status:    "done",
@@ -137,26 +121,6 @@ async function attemptFetch(userId) {
   }
 }
 
-async function fetchAwardedDates(userId, badgeIds) {
-  const dates = {};
-  const BATCH = 100;
-  for (let i = 0; i < badgeIds.length; i += BATCH) {
-    const chunk = badgeIds.slice(i, i + BATCH);
-    try {
-      const resp = await fetch(
-        `${ROBLOX_BADGES_API}/${userId}/badges/awarded-dates?badgeIds=${chunk.join(",")}`,
-        { headers: { Accept: "application/json" } }
-      );
-      if (!resp.ok) continue;
-      const data = await resp.json();
-      for (const item of (data.data || [])) {
-        dates[item.badgeId] = item.awardedDate || null;
-      }
-    } catch {}
-    if (i + BATCH < badgeIds.length) await sleep(200);
-  }
-  return dates;
-}
 
 async function kvGet(key) {
   try {
