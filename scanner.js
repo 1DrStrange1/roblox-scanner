@@ -66,13 +66,6 @@ async function main() {
       console.log(`⏳ Инвентарь закрыт (${result.reason}). Жду 5 секунд...`);
     }
 
-    await kvPut(`task:${USER_ID}`, {
-      status:    "scanning",
-      attempt,
-      updatedAt: new Date().toISOString(),
-      userId:    USER_ID
-    });
-
     await sleep(RETRY_INTERVAL_MS);
   }
 
