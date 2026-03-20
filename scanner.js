@@ -43,6 +43,8 @@ async function main() {
       console.log(`📅 Запрашиваю даты для сортировки...`);
 
       const awardedDates = await fetchAwardedDates(USER_ID, result.badges.map(b => b.id));
+      const datesCount = Object.values(awardedDates).filter(d => d !== null).length;
+      console.log(`📅 Получено дат: ${datesCount} из ${result.badges.length}`);
       result.badges.sort((a, b) => {
         const da = awardedDates[a.id] ? new Date(awardedDates[a.id]).getTime() : null;
         const db = awardedDates[b.id] ? new Date(awardedDates[b.id]).getTime() : null;
