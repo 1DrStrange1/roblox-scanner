@@ -2,18 +2,17 @@ name: Roblox Badge Scanner
 
 on:
   schedule:
-    - cron: '*/5 * * * *'  # резервный запуск каждые 5 минут
-  workflow_dispatch:         # ручной запуск
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
   push:
     branches: [ main ]
     paths:
-      - '.trigger'           # запускается только если изменился файл .trigger
+      - '.trigger'
 
 jobs:
   scan:
     runs-on: ubuntu-latest
     timeout-minutes: 6
-    # Не запускаем больше одного скрипта одновременно
     concurrency:
       group: scanner
       cancel-in-progress: false
@@ -28,6 +27,36 @@ jobs:
         uses: actions/setup-node@v4.4.0
         with:
           node-version: '24'
+
+      - name: Удаляем старые запуски
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          REPO:   ${{ github.repository }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+        run: |
+          # Получаем все завершённые запуски кроме текущего и удаляем их
+          curl -s \
+            -H "Authorization: Bearer $GH_PAT" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/actions/runs?per_page=100&status=completed" \
+          | node -e "
+            let d='';
+            process.stdin.on('data',c=>d+=c);
+            process.stdin.on('end', async ()=>{
+              const runs = JSON.parse(d).workflow_runs || [];
+              const current = process.env.CURRENT_RUN_ID;
+              const token = process.env.GH_PAT;
+              const repo  = process.env.REPO;
+              for(const run of runs){
+                if(String(run.id) === current) continue;
+                await fetch('https://api.github.com/repos/'+repo+'/actions/runs/'+run.id, {
+                  method:'DELETE',
+                  headers:{ Authorization:'Bearer '+token, Accept:'application/vnd.github+json' }
+                });
+                console.log('Удалён запуск #'+run.id);
+              }
+            });
+          "
 
       - name: Проверяем — нашли ли уже ачивки
         id: check
@@ -72,7 +101,6 @@ jobs:
         run: |
           git config user.email "scanner@bot.local"
           git config user.name  "Scanner Bot"
-          # Меняем файл .trigger — это вызовет новый push-триггер
           echo $(date +%s) > .trigger
           git add .trigger
           git commit -m "rescan $(date +%H:%M:%S)"
