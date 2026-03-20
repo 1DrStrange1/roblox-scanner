@@ -1,7 +1,7 @@
 /**
  * scanner.js — Roblox Badge Scanner
  * Запускается GitHub Actions каждые 5 минут.
- * Сортирует ачивки от новых к старым по дате получения.
+ * Внутри сканирует каждые 5 сек в течение 4.5 минут.
  * Останавливается только когда найдено больше 0 ачивок.
  */
 
@@ -12,7 +12,7 @@ const CF_TOKEN  = process.env.CF_TOKEN;
 const ROBLOX_BADGES_API = "https://badges.roblox.com/v1/users";
 const ROBLOX_USERS_API  = "https://users.roblox.com/v1/users";
 const RETRY_INTERVAL_MS = 5000;
-const MAX_RUNTIME_MS    = 270000;
+const MAX_RUNTIME_MS    = 270000; // 4.5 минуты
 
 async function main() {
   if (!USER_ID || !CF_KV_URL || !CF_TOKEN) {
@@ -34,25 +34,28 @@ async function main() {
   while (Date.now() - startTime < MAX_RUNTIME_MS) {
     attempt++;
     const elapsed = Math.round((Date.now() - startTime) / 1000);
-    console.log(`\n🔄 Попытка #${attempt} (прошло ${elapsed}с)`);
+    console.log(`🔄 Попытка #${attempt} (прошло ${elapsed}с)`);
 
     const result = await attemptFetch(USER_ID);
 
     if (result.success && result.badges.length > 0) {
       console.log(`✅ Найдено ${result.badges.length} ачивок для ${result.username}`);
-      console.log(`📅 Запрашиваю даты получения для сортировки...`);
+      console.log(`📅 Запрашиваю даты для сортировки...`);
 
-      // Получаем даты получения — только для сортировки, показывать не будем
       const awardedDates = await fetchAwardedDates(USER_ID, result.badges.map(b => b.id));
-
-      // Сортируем от новых к старым
       result.badges.sort((a, b) => {
-        const da = awardedDates[a.id] ? new Date(awardedDates[a.id]) : new Date(0);
-        const db = awardedDates[b.id] ? new Date(awardedDates[b.id]) : new Date(0);
-        return db - da; // новые сначала
+        const da = awardedDates[a.id] ? new Date(awardedDates[a.id]).getTime() : null;
+        const db = awardedDates[b.id] ? new Date(awardedDates[b.id]).getTime() : null;
+
+        // Оба есть — сортируем по дате (новые сначала)
+        if (da && db) return db - da;
+        // Только у одного есть дата — тот у кого есть идёт раньше
+        if (da && !db) return -1;
+        if (!da && db) return 1;
+        // У обоих нет даты — сортируем по ID (больший = новее)
+        return b.id - a.id;
       });
 
-      console.log(`💾 Сохраняю в Cloudflare KV...`);
       await kvPut(`badges:${USER_ID}`, {
         status:    "done",
         scannedAt: new Date().toISOString(),
@@ -81,14 +84,13 @@ async function main() {
       status:    "scanning",
       attempt,
       updatedAt: new Date().toISOString(),
-      userId:    USER_ID,
-      runner:    "github-actions"
+      userId:    USER_ID
     });
 
     await sleep(RETRY_INTERVAL_MS);
   }
 
-  console.log(`\n⏰ Время вышло. GitHub Actions запустит заново через 5 минут.`);
+  console.log(`⏰ Время вышло. Следующий запуск через ~30 секунд по cron.`);
   process.exit(0);
 }
 
@@ -117,10 +119,10 @@ async function attemptFetch(userId) {
       const page = await resp.json();
       for (const b of (page.data || [])) {
         badges.push({
-          id:          b.id,
-          name:        b.name,
-          gameId:      b.awarder?.id   || null,
-          gameName:    b.awarder?.name || null
+          id:       b.id,
+          name:     b.name,
+          gameId:   b.awarder?.id   || null,
+          gameName: b.awarder?.name || null
         });
       }
       cursor = page.nextPageCursor || "";
@@ -136,7 +138,6 @@ async function attemptFetch(userId) {
 async function fetchAwardedDates(userId, badgeIds) {
   const dates = {};
   const BATCH = 100;
-
   for (let i = 0; i < badgeIds.length; i += BATCH) {
     const chunk = badgeIds.slice(i, i + BATCH);
     try {
@@ -152,7 +153,6 @@ async function fetchAwardedDates(userId, badgeIds) {
     } catch {}
     if (i + BATCH < badgeIds.length) await sleep(200);
   }
-
   return dates;
 }
 
