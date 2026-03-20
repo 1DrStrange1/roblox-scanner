@@ -2,35 +2,44 @@ name: Roblox Badge Scanner
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
-  workflow_dispatch:
+    - cron: '*/5 * * * *'  # резервный запуск каждые 5 минут
+  workflow_dispatch:         # ручной запуск
+  push:
+    branches: [ main ]
+    paths:
+      - '.trigger'           # запускается только если изменился файл .trigger
 
 jobs:
   scan:
     runs-on: ubuntu-latest
     timeout-minutes: 6
+    # Не запускаем больше одного скрипта одновременно
+    concurrency:
+      group: scanner
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
+        with:
+          token: ${{ secrets.GH_PAT }}
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v4.4.0
         with:
-          node-version: '20'
+          node-version: '24'
 
       - name: Проверяем — нашли ли уже ачивки
         id: check
         env:
-          CF_KV_URL: ${{ secrets.CF_KV_URL }}
-          CF_TOKEN:  ${{ secrets.CF_TOKEN }}
+          CF_KV_URL:      ${{ secrets.CF_KV_URL }}
+          CF_TOKEN:       ${{ secrets.CF_TOKEN }}
           ROBLOX_USER_ID: ${{ secrets.ROBLOX_USER_ID }}
         run: |
           RESPONSE=$(curl -s \
             -H "Authorization: Bearer $CF_TOKEN" \
             "$CF_KV_URL/values/badges%3A$ROBLOX_USER_ID")
-          
-          # Проверяем количество ачивок в ответе
+
           COUNT=$(echo "$RESPONSE" | node -e "
             let d='';
             process.stdin.on('data',c=>d+=c);
@@ -41,13 +50,13 @@ jobs:
               }catch(e){ console.log(0); }
             });
           ")
-          
+
           if [ "$COUNT" -gt "0" ] 2>/dev/null; then
             echo "done=true" >> $GITHUB_OUTPUT
-            echo "✅ Уже найдено $COUNT ачивок — пропускаем"
+            echo "✅ Уже найдено $COUNT ачивок — останавливаемся"
           else
             echo "done=false" >> $GITHUB_OUTPUT
-            echo "🔄 Ачивок нет или 0 — запускаем сканирование"
+            echo "🔄 Ачивок нет — запускаем сканирование"
           fi
 
       - name: Запуск сканера
@@ -57,3 +66,14 @@ jobs:
           CF_KV_URL:      ${{ secrets.CF_KV_URL }}
           CF_TOKEN:       ${{ secrets.CF_TOKEN }}
         run: node scanner.js
+
+      - name: Перезапуск через commit
+        if: steps.check.outputs.done == 'false'
+        run: |
+          git config user.email "scanner@bot.local"
+          git config user.name  "Scanner Bot"
+          # Меняем файл .trigger — это вызовет новый push-триггер
+          echo $(date +%s) > .trigger
+          git add .trigger
+          git commit -m "rescan $(date +%H:%M:%S)"
+          git push
