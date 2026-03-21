@@ -1,10 +1,3 @@
-/**
- * scanner.js — Roblox Badge Scanner
- * Запускается GitHub Actions каждые 5 минут.
- * Внутри сканирует каждые 5 сек в течение 4.5 минут.
- * Останавливается только когда найдено больше 0 ачивок.
- */
-
 const USER_ID   = process.env.ROBLOX_USER_ID;
 const CF_KV_URL = process.env.CF_KV_URL;
 const CF_TOKEN  = process.env.CF_TOKEN;
@@ -12,19 +5,19 @@ const CF_TOKEN  = process.env.CF_TOKEN;
 const ROBLOX_BADGES_API = "https://badges.roblox.com/v1/users";
 const ROBLOX_USERS_API  = "https://users.roblox.com/v1/users";
 const RETRY_INTERVAL_MS = 5000;
-const MAX_RUNTIME_MS    = 270000; // 4.5 минуты
+const MAX_RUNTIME_MS    = 270000;
 
 async function main() {
   if (!USER_ID || !CF_KV_URL || !CF_TOKEN) {
-    console.error("❌ Не заданы переменные окружения. Проверь GitHub Secrets.");
+    console.error("Missing environment variables. Check GitHub Secrets.");
     process.exit(1);
   }
 
-  console.log(`🎮 Сканирую игрока: ${USER_ID}`);
+  console.log(`Scanning player: ${USER_ID}`);
 
   const existing = await kvGet(`badges:${USER_ID}`);
   if (existing?.status === "done" && existing.badges.length > 0) {
-    console.log(`✅ Данные уже есть (${existing.badges.length} ачивок). Выходим.`);
+    console.log(`Already have ${existing.badges.length} badges. Done.`);
     process.exit(0);
   }
 
@@ -34,13 +27,12 @@ async function main() {
   while (Date.now() - startTime < MAX_RUNTIME_MS) {
     attempt++;
     const elapsed = Math.round((Date.now() - startTime) / 1000);
-    console.log(`🔄 Попытка #${attempt} (прошло ${elapsed}с)`);
+    console.log(`Attempt #${attempt} (${elapsed}s elapsed)`);
 
     const result = await attemptFetch(USER_ID);
 
     if (result.success && result.badges.length > 0) {
-      console.log(`✅ Найдено ${result.badges.length} ачивок для ${result.username}`);
-
+      console.log(`Found ${result.badges.length} badges for ${result.username}`);
 
       await kvPut(`badges:${USER_ID}`, {
         status:    "done",
@@ -51,25 +43,25 @@ async function main() {
       });
       await kvDelete(`task:${USER_ID}`);
 
-      console.log("✅ Данные сохранены навсегда.");
+      console.log("Saved to Cloudflare KV.");
       process.exit(0);
     }
 
     if (result.reason === "user_not_found") {
-      console.error(`❌ Игрок ${USER_ID} не найден.`);
+      console.error(`Player ${USER_ID} not found.`);
       process.exit(1);
     }
 
     if (result.success && result.badges.length === 0) {
-      console.log(`⏳ Инвентарь открыт но ачивок 0. Жду 5 секунд...`);
+      console.log(`Inventory open but 0 badges. Retrying in 5s...`);
     } else {
-      console.log(`⏳ Инвентарь закрыт (${result.reason}). Жду 5 секунд...`);
+      console.log(`Inventory private (${result.reason}). Retrying in 5s...`);
     }
 
     await sleep(RETRY_INTERVAL_MS);
   }
 
-  console.log(`⏰ Время вышло. Следующий запуск через ~30 секунд по cron.`);
+  console.log(`Time limit reached. Next run in ~30s via cron.`);
   process.exit(0);
 }
 
@@ -114,7 +106,6 @@ async function attemptFetch(userId) {
   }
 }
 
-
 async function kvGet(key) {
   try {
     const resp = await fetch(`${CF_KV_URL}/values/${encodeURIComponent(key)}`, {
@@ -148,6 +139,6 @@ async function kvDelete(key) {
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 main().catch(err => {
-  console.error("💥 Неожиданная ошибка:", err);
+  console.error("Unexpected error:", err);
   process.exit(1);
 });
