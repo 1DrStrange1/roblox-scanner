@@ -28,12 +28,13 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Delete old runs
+      - name: Удаляем старые запуски
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
           REPO:   ${{ github.repository }}
           CURRENT_RUN_ID: ${{ github.run_id }}
         run: |
+          # Получаем все завершённые запуски кроме текущего и удаляем их
           curl -s \
             -H "Authorization: Bearer $GH_PAT" \
             -H "Accept: application/vnd.github+json" \
@@ -52,12 +53,12 @@ jobs:
                   method:'DELETE',
                   headers:{ Authorization:'Bearer '+token, Accept:'application/vnd.github+json' }
                 });
-                console.log('Deleted run #'+run.id);
+                console.log('Удалён запуск #'+run.id);
               }
             });
           "
 
-      - name: Check if badges already found
+      - name: Проверяем — нашли ли уже ачивки
         id: check
         env:
           CF_KV_URL:      ${{ secrets.CF_KV_URL }}
@@ -67,6 +68,7 @@ jobs:
           RESPONSE=$(curl -s \
             -H "Authorization: Bearer $CF_TOKEN" \
             "$CF_KV_URL/values/badges%3A$ROBLOX_USER_ID")
+
           COUNT=$(echo "$RESPONSE" | node -e "
             let d='';
             process.stdin.on('data',c=>d+=c);
@@ -77,15 +79,16 @@ jobs:
               }catch(e){ console.log(0); }
             });
           ")
+
           if [ "$COUNT" -gt "0" ] 2>/dev/null; then
             echo "done=true" >> $GITHUB_OUTPUT
-            echo "Already found $COUNT badges — stopping"
+            echo "✅ Уже найдено $COUNT ачивок — останавливаемся"
           else
             echo "done=false" >> $GITHUB_OUTPUT
-            echo "No badges yet — starting scanner"
+            echo "🔄 Ачивок нет — запускаем сканирование"
           fi
 
-      - name: Run scanner
+      - name: Запуск сканера
         if: steps.check.outputs.done == 'false'
         env:
           ROBLOX_USER_ID: ${{ secrets.ROBLOX_USER_ID }}
@@ -93,7 +96,7 @@ jobs:
           CF_TOKEN:       ${{ secrets.CF_TOKEN }}
         run: node scanner.js
 
-      - name: Trigger next run via commit
+      - name: Перезапуск через commit
         if: steps.check.outputs.done == 'false'
         run: |
           git config user.email "scanner@bot.local"
