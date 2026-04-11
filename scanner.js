@@ -109,8 +109,7 @@ async function attemptFetch(userId) {
         badges.push({
           id:       b.id,
           name:     b.name,
-          gameId:   b.awarder?.id   || null,
-          gameName: b.awarder?.name || null
+          gameId:   b.awarder?.id || null
         });
       }
       cursor = page.nextPageCursor || "";
