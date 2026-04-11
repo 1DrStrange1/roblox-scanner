@@ -4,7 +4,6 @@ const CF_TOKEN  = process.env.CF_TOKEN;
 
 const ROBLOX_BADGES_API    = "https://badges.roblox.com/v1/users";
 const ROBLOX_USERS_API     = "https://users.roblox.com/v1/users";
-const ROBLOX_INVENTORY_API = "https://inventory.roblox.com/v1/users";
 const RETRY_INTERVAL_MS    = 5000;
 const MAX_RUNTIME_MS       = 270000;
 
@@ -126,12 +125,14 @@ async function attemptFetch(userId) {
 
 async function fetchGamepasses(userId) {
   const gamepasses = [];
-  let cursor = "", pages = 0;
+  let lastId = null;
+  let pages  = 0;
 
   try {
     do {
-      const url = `${ROBLOX_INVENTORY_API}/${userId}/items/GamePass?limit=100&sortOrder=Asc` +
-                  (cursor ? `&cursor=${encodeURIComponent(cursor)}` : "");
+      let url = `https://apis.roblox.com/game-passes/v1/users/${userId}/game-passes?count=100`;
+      if (lastId) url += `&exclusiveStartId=${lastId}`;
+
       const resp = await fetch(url, { headers: { Accept: "application/json" } });
 
       if (!resp.ok) {
@@ -140,20 +141,32 @@ async function fetchGamepasses(userId) {
       }
 
       const page = await resp.json();
-      for (const g of (page.data || [])) {
+      const items = page.gamePasses || page.data || [];
+
+      if (items.length === 0) break;
+
+      for (const g of items) {
         gamepasses.push({
-          id:       g.id,
-          name:     g.name,
-          gameId:   g.assetType === "GamePass" ? null : null
+          id:        g.gamePassId,
+          name:      g.name,
+          creatorId: g.creator?.creatorId   || null,
+          creatorName: g.creator?.name      || null,
+          creatorType: g.creator?.creatorType || null
         });
       }
-      cursor = page.nextPageCursor || "";
+
+      lastId = items[items.length - 1].gamePassId;
       pages++;
-    } while (cursor && pages < 100);
+
+      // Если вернулось меньше 100 — это последняя страница
+      if (items.length < 100) break;
+
+    } while (pages < 100);
   } catch (err) {
     console.log(`Gamepasses error: ${err}`);
   }
 
+  console.log(`Fetched ${gamepasses.length} gamepasses`);
   return gamepasses;
 }
 
