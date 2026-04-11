@@ -1,4 +1,5 @@
 name: Roblox Badge Scanner
+
 on:
   schedule:
     - cron: '*/5 * * * *'
@@ -7,6 +8,7 @@ on:
     branches: [ main ]
     paths:
       - '.trigger'
+
 jobs:
   scan:
     runs-on: ubuntu-latest
@@ -14,16 +16,19 @@ jobs:
     concurrency:
       group: scanner
       cancel-in-progress: false
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4.2.2
         with:
           token: ${{ secrets.GH_PAT }}
+
       - name: Setup Node.js
         uses: actions/setup-node@v4.4.0
         with:
           node-version: '24'
-      - name: Удаляем старые запуски
+
+      - name: Delete old runs
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
           REPO:   ${{ github.repository }}
@@ -47,11 +52,12 @@ jobs:
                   method:'DELETE',
                   headers:{ Authorization:'Bearer '+token, Accept:'application/vnd.github+json' }
                 });
-                console.log('Удалён запуск #'+run.id);
+                console.log('Deleted run #'+run.id);
               }
             });
           "
-      - name: Проверяем — нашли ли уже ачивки
+
+      - name: Check if badges already found
         id: check
         env:
           CF_KV_URL:      ${{ secrets.CF_KV_URL }}
@@ -73,19 +79,21 @@ jobs:
           ")
           if [ "$COUNT" -gt "0" ] 2>/dev/null; then
             echo "done=true" >> $GITHUB_OUTPUT
-            echo "✅ Уже найдено $COUNT ачивок — останавливаемся"
+            echo "Already found $COUNT badges - stopping"
           else
             echo "done=false" >> $GITHUB_OUTPUT
-            echo "🔄 Ачивок нет — запускаем сканирование"
+            echo "No badges yet - starting scanner"
           fi
-      - name: Запуск сканера
+
+      - name: Run scanner
         if: steps.check.outputs.done == 'false'
         env:
           ROBLOX_USER_ID: ${{ secrets.ROBLOX_USER_ID }}
           CF_KV_URL:      ${{ secrets.CF_KV_URL }}
           CF_TOKEN:       ${{ secrets.CF_TOKEN }}
         run: node scanner.js
-      - name: Перезапуск через commit
+
+      - name: Trigger next run via commit
         if: steps.check.outputs.done == 'false'
         run: |
           git config user.email "scanner@bot.local"
