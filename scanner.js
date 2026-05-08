@@ -1,11 +1,18 @@
-const USER_ID   = process.env.ROBLOX_USER_ID;
-const CF_KV_URL = process.env.CF_KV_URL;
-const CF_TOKEN  = process.env.CF_TOKEN;
+const USER_ID      = process.env.ROBLOX_USER_ID;
+const CF_KV_URL    = process.env.CF_KV_URL;
+const CF_TOKEN     = process.env.CF_TOKEN;
+const ROBLOSECURITY = process.env.ROBLOSECURITY;
 
-const ROBLOX_BADGES_API    = "https://badges.roblox.com/v1/users";
-const ROBLOX_USERS_API     = "https://users.roblox.com/v1/users";
-const RETRY_INTERVAL_MS    = 5000;
-const MAX_RUNTIME_MS       = 270000;
+const ROBLOX_BADGES_API = "https://badges.roblox.com/v1/users";
+const ROBLOX_USERS_API  = "https://users.roblox.com/v1/users";
+const RETRY_INTERVAL_MS = 5000;
+const MAX_RUNTIME_MS    = 270000;
+
+function robloxHeaders() {
+  const h = { Accept: "application/json" };
+  if (ROBLOSECURITY) h["Cookie"] = `.ROBLOSECURITY=${ROBLOSECURITY}`;
+  return h;
+}
 
 async function main() {
   if (!USER_ID || !CF_KV_URL || !CF_TOKEN) {
@@ -34,7 +41,6 @@ async function main() {
     if (result.success && result.badges.length > 0) {
       console.log(`Found ${result.badges.length} badges for ${result.username}`);
 
-      // Сохраняем ачивки сразу
       await kvPut(`badges:${USER_ID}`, {
         status:    "done",
         scannedAt: new Date().toISOString(),
@@ -45,11 +51,9 @@ async function main() {
       });
       console.log("Badges saved. Now scanning gamepasses...");
 
-      // Сканируем геймпассы — если инвентарь закроется, ачивки уже сохранены
       const gamepasses = await fetchGamepasses(USER_ID);
       console.log(`Found ${gamepasses.length} gamepasses`);
 
-      // Обновляем запись с геймпассами
       await kvPut(`badges:${USER_ID}`, {
         status:    "done",
         scannedAt: new Date().toISOString(),
@@ -85,7 +89,7 @@ async function main() {
 async function attemptFetch(userId) {
   try {
     const userResp = await fetch(`${ROBLOX_USERS_API}/${userId}`, {
-      headers: { Accept: "application/json" }
+      headers: robloxHeaders()
     });
     if (userResp.status === 404) return { success: false, reason: "user_not_found" };
     if (!userResp.ok)           return { success: false, reason: `user_${userResp.status}` };
@@ -97,7 +101,7 @@ async function attemptFetch(userId) {
     do {
       const url  = `${ROBLOX_BADGES_API}/${userId}/badges?limit=100&sortOrder=Asc` +
                    (cursor ? `&cursor=${encodeURIComponent(cursor)}` : "");
-      const resp = await fetch(url, { headers: { Accept: "application/json" } });
+      const resp = await fetch(url, { headers: robloxHeaders() });
 
       if (resp.status === 403 || resp.status === 401)
         return { success: false, reason: "private" };
@@ -107,9 +111,9 @@ async function attemptFetch(userId) {
       const page = await resp.json();
       for (const b of (page.data || [])) {
         badges.push({
-          id:       b.id,
-          name:     b.name,
-          gameId:   b.awarder?.id || null
+          id:     b.id,
+          name:   b.name,
+          gameId: b.awarder?.id || null
         });
       }
       cursor = page.nextPageCursor || "";
@@ -132,7 +136,7 @@ async function fetchGamepasses(userId) {
       let url = `https://apis.roblox.com/game-passes/v1/users/${userId}/game-passes?count=100`;
       if (lastId) url += `&exclusiveStartId=${lastId}`;
 
-      const resp = await fetch(url, { headers: { Accept: "application/json" } });
+      const resp = await fetch(url, { headers: robloxHeaders() });
 
       if (!resp.ok) {
         console.log(`Gamepasses fetch failed: ${resp.status}`);
@@ -146,26 +150,22 @@ async function fetchGamepasses(userId) {
 
       for (const g of items) {
         gamepasses.push({
-          id:        g.gamePassId,
-          name:      g.name,
-          creatorId: g.creator?.creatorId   || null,
-          creatorName: g.creator?.name      || null,
+          id:          g.gamePassId,
+          name:        g.name,
+          creatorId:   g.creator?.creatorId   || null,
+          creatorName: g.creator?.name        || null,
           creatorType: g.creator?.creatorType || null
         });
       }
 
       lastId = items[items.length - 1].gamePassId;
       pages++;
-
-      // Если вернулось меньше 100 — это последняя страница
       if (items.length < 100) break;
-
     } while (pages < 100);
   } catch (err) {
     console.log(`Gamepasses error: ${err}`);
   }
 
-  console.log(`Fetched ${gamepasses.length} gamepasses`);
   return gamepasses;
 }
 
