@@ -4,11 +4,34 @@ const CF_TOKEN   = process.env.CF_TOKEN;
 const WORKER_URL = process.env.WORKER_URL;
 const PROXY_KEY  = process.env.PROXY_KEY;
 
+const ROBLOX_BADGES_API = "https://badges.roblox.com/v1/users";
+const ROBLOX_USERS_API  = "https://users.roblox.com/v1/users";
 const RETRY_INTERVAL_MS = 5000;
 const MAX_RUNTIME_MS    = 270000;
 
+// ДОБАВЛЕНО: диагностика env
+function checkEnv() {
+  const missing = [];
+
+  if (!USER_ID) missing.push("ROBLOX_USER_ID");
+  if (!CF_KV_URL) missing.push("CF_KV_URL");
+  if (!CF_TOKEN) missing.push("CF_TOKEN");
+  if (!WORKER_URL) missing.push("WORKER_URL");
+  if (!PROXY_KEY) missing.push("PROXY_KEY");
+
+  if (missing.length > 0) {
+    console.error("❌ Missing environment variables:");
+    for (const m of missing) console.error(" - " + m);
+    console.error("\n👉 Add them in GitHub Secrets / Actions env.");
+    process.exit(1);
+  }
+
+  console.log("✅ All environment variables loaded");
+}
+
+// Все запросы к Roblox идут через Cloudflare Worker (обходит блокировку IP)
 async function robloxFetch(url) {
-  return fetch(`${WORKER_URL}/proxy`, {
+  const resp = await fetch(`${WORKER_URL}/proxy`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -16,33 +39,32 @@ async function robloxFetch(url) {
     },
     body: JSON.stringify({ url })
   });
+  return resp;
 }
 
 async function main() {
-  if (!USER_ID || !CF_KV_URL || !CF_TOKEN || !WORKER_URL || !PROXY_KEY) {
-    console.error("Missing env variables");
-    process.exit(1);
-  }
+  checkEnv(); // <-- ДОБАВЛЕНО
 
   console.log(`Scanning player: ${USER_ID}`);
 
   const existing = await kvGet(`badges:${USER_ID}`);
-  if (existing?.status === "done" && existing.badges?.length > 0) {
-    console.log(`Already scanned: ${existing.badges.length}`);
+  if (existing?.status === "done" && existing.badges.length > 0) {
+    console.log(`Already have ${existing.badges.length} badges. Done.`);
     process.exit(0);
   }
 
-  const start = Date.now();
+  const startTime = Date.now();
   let attempt = 0;
 
-  while (Date.now() - start < MAX_RUNTIME_MS) {
+  while (Date.now() - startTime < MAX_RUNTIME_MS) {
     attempt++;
-    console.log(`Attempt #${attempt}`);
+    const elapsed = Math.round((Date.now() - startTime) / 1000);
+    console.log(`Attempt #${attempt} (${elapsed}s elapsed)`);
 
     const result = await attemptFetch(USER_ID);
 
-    if (result.success) {
-      console.log(`Found ${result.badges.length} badges`);
+    if (result.success && result.badges.length > 0) {
+      console.log(`Found ${result.badges.length} badges for ${result.username}`);
 
       await kvPut(`badges:${USER_ID}`, {
         status: "done",
@@ -53,7 +75,10 @@ async function main() {
         gamepasses: []
       });
 
+      console.log("Badges saved. Now scanning gamepasses...");
+
       const gamepasses = await fetchGamepasses(USER_ID);
+      console.log(`Found ${gamepasses.length} gamepasses`);
 
       await kvPut(`badges:${USER_ID}`, {
         status: "done",
@@ -65,79 +90,53 @@ async function main() {
       });
 
       await kvDelete(`task:${USER_ID}`);
-
-      console.log("DONE");
+      console.log("All data saved.");
       process.exit(0);
     }
 
-    if (result.reason === "not_found") {
-      console.error("User not found");
+    if (result.reason === "user_not_found") {
+      console.error(`Player ${USER_ID} not found.`);
       process.exit(1);
     }
 
-    if (result.reason === "blocked_or_private") {
-      console.log("Blocked/Private/403 — retrying...");
+    if (result.success && result.badges.length === 0) {
+      console.log(`Inventory open but 0 badges. Retrying in 5s...`);
     } else {
-      console.log(`Retry reason: ${result.reason}`);
+      console.log(`Inventory private (${result.reason}). Retrying in 5s...`);
     }
 
     await sleep(RETRY_INTERVAL_MS);
   }
 
-  console.log("Timeout reached");
+  console.log(`Time limit reached. Next run in ~30s via cron.`);
+  process.exit(0);
 }
 
 async function attemptFetch(userId) {
   try {
-    const userResp = await robloxFetch(
-      `https://users.roblox.com/v1/users/${userId}`
-    );
+    const userResp = await robloxFetch(`${ROBLOX_USERS_API}/${userId}`);
+    if (userResp.status === 404) return { success: false, reason: "user_not_found" };
+    if (!userResp.ok) return { success: false, reason: `user_${userResp.status}` };
 
-    if (userResp.status === 404)
-      return { success: false, reason: "not_found" };
-
-    if (!userResp.ok)
-      return { success: false, reason: `user_${userResp.status}` };
-
-    const user = await userResp.json();
+    const { name: username } = await userResp.json();
 
     const badges = [];
-    let cursor = "";
-    let pages = 0;
+    let cursor = "", pages = 0;
 
     do {
-      const url =
-        `https://badges.roblox.com/v1/users/${userId}/badges?limit=100&sortOrder=Asc` +
-        (cursor ? `&cursor=${cursor}` : "");
+      const url = `${ROBLOX_BADGES_API}/${userId}/badges?limit=100&sortOrder=Asc` +
+        (cursor ? `&cursor=${encodeURIComponent(cursor)}` : "");
 
       const resp = await robloxFetch(url);
 
-      const text = await resp.text();
-
-      // DEBUG (очень важно)
-      // console.log("STATUS:", resp.status);
-      // console.log(text);
-
-      if (resp.status === 404)
-        return { success: false, reason: "not_found" };
-
-      if (resp.status === 401)
-        return { success: false, reason: "auth" };
-
-      if (resp.status === 403)
-        return { success: false, reason: "blocked_or_private" };
-
+      if (resp.status === 403 || resp.status === 401)
+        return { success: false, reason: "private" };
       if (!resp.ok)
         return { success: false, reason: `badges_${resp.status}` };
 
-      let data;
-      try {
-        data = JSON.parse(text);
-      } catch {
-        return { success: false, reason: "invalid_json" };
-      }
+      const page = await resp.json();
 
-      for (const b of (data.data || [])) {
+      for (const b of (page.data || [])) {
         badges.push({
           id: b.id,
           name: b.name,
@@ -145,96 +144,104 @@ async function attemptFetch(userId) {
         });
       }
 
-      cursor = data.nextPageCursor || "";
+      cursor = page.nextPageCursor || "";
       pages++;
-
     } while (cursor && pages < 100);
 
-    return {
-      success: true,
-      username: user.name,
-      badges
-    };
+    return { success: true, username, badges };
 
-  } catch (e) {
-    return { success: false, reason: "network_error", detail: String(e) };
+  } catch (err) {
+    return { success: false, reason: "network_error", detail: String(err) };
   }
 }
 
 async function fetchGamepasses(userId) {
-  const result = [];
+  const gamepasses = [];
+  let lastId = null;
+  let pages = 0;
 
   try {
-    let cursor = "";
-    let pages = 0;
-
     do {
-      const url =
-        `https://games.roblox.com/v2/users/${userId}/game-passes?limit=100` +
-        (cursor ? `&cursor=${cursor}` : "");
+      let url = `https://apis.roblox.com/game-passes/v1/users/${userId}/game-passes?count=100`;
+      if (lastId) url += `&exclusiveStartId=${lastId}`;
 
       const resp = await robloxFetch(url);
 
-      const text = await resp.text();
-
-      if (!resp.ok) break;
-
-      let data;
-      try {
-        data = JSON.parse(text);
-      } catch {
+      if (!resp.ok) {
+        console.log(`Gamepasses fetch failed: ${resp.status}`);
         break;
       }
 
-      const items = data.data || [];
+      const page = await resp.json();
+      const items = page.gamePasses || page.data || [];
+
+      if (items.length === 0) break;
 
       for (const g of items) {
-        result.push({
-          id: g.id,
-          name: g.name
+        gamepasses.push({
+          id: g.gamePassId,
+          name: g.name,
+          creatorId: g.creator?.creatorId || null,
+          creatorName: g.creator?.name || null,
+          creatorType: g.creator?.creatorType || null
         });
       }
 
-      cursor = data.nextPageCursor || "";
+      lastId = items[items.length - 1].gamePassId;
       pages++;
 
       if (items.length < 100) break;
 
-    } while (pages < 50);
+    } while (pages < 100);
 
-  } catch (e) {
-    console.log("gamepasses error", e);
+  } catch (err) {
+    console.log(`Gamepasses error: ${err}`);
   }
 
-  return result;
+  return gamepasses;
 }
 
 async function kvGet(key) {
-  const r = await fetch(`${CF_KV_URL}/values/${encodeURIComponent(key)}`, {
-    headers: { Authorization: `Bearer ${CF_TOKEN}` }
-  });
-  if (!r.ok) return null;
-  return r.json();
+  try {
+    const resp = await fetch(`${CF_KV_URL}/values/${encodeURIComponent(key)}`, {
+      headers: { Authorization: `Bearer ${CF_TOKEN}` }
+    });
+    if (!resp.ok) return null;
+    return JSON.parse(await resp.text());
+  } catch { return null; }
 }
 
 async function kvPut(key, value) {
-  await fetch(`${CF_KV_URL}/values/${encodeURIComponent(key)}`, {
-    method: "PUT",
-    headers: {
-      Authorization: `Bearer ${CF_TOKEN}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(value)
-  });
+  try {
+    const resp = await fetch(`${CF_KV_URL}/values/${encodeURIComponent(key)}`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${CF_TOKEN}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(value)
+    });
+
+    if (!resp.ok) console.error(`KV PUT error: ${await resp.text()}`);
+  } catch (err) {
+    console.error(`KV PUT exception: ${err}`);
+  }
 }
 
 async function kvDelete(key) {
-  await fetch(`${CF_KV_URL}/values/${encodeURIComponent(key)}`, {
-    method: "DELETE",
-    headers: { Authorization: `Bearer ${CF_TOKEN}` }
-  });
+  try {
+    await fetch(`${CF_KV_URL}/values/${encodeURIComponent(key)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${CF_TOKEN}` }
+    });
+  } catch {}
 }
 
-const sleep = ms => new Promise(r => setTimeout(r, ms));
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
 
-main().catch(console.error);
+main().catch(err => {
+  console.error("Unexpected error:", err);
+  process.exit(1);
+});
