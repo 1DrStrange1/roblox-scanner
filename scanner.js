@@ -1,6 +1,7 @@
 const USER_ID   = process.env.ROBLOX_USER_ID;
 const CF_KV_URL = process.env.CF_KV_URL;
 const CF_TOKEN  = process.env.CF_TOKEN;
+const ROBLOX_TOKEN = process.env.ROBLOX_TOKEN; // ✅ Новое: Roblox токен
 
 const ROBLOX_BADGES_API    = "https://badges.roblox.com/v1/users";
 const ROBLOX_USERS_API     = "https://users.roblox.com/v1/users";
@@ -11,6 +12,10 @@ async function main() {
   if (!USER_ID || !CF_KV_URL || !CF_TOKEN) {
     console.error("Missing environment variables. Check GitHub Secrets.");
     process.exit(1);
+  }
+
+  if (!ROBLOX_TOKEN) {
+    console.warn("⚠️ ROBLOX_TOKEN not set. Using public API (limited).");
   }
 
   console.log(`Scanning player: ${USER_ID}`);
@@ -84,9 +89,14 @@ async function main() {
 
 async function attemptFetch(userId) {
   try {
-    const userResp = await fetch(`${ROBLOX_USERS_API}/${userId}`, {
-      headers: { Accept: "application/json" }
-    });
+    const headers = { Accept: "application/json" };
+    
+    // ✅ Добавляем Roblox токен если есть
+    if (ROBLOX_TOKEN) {
+      headers["Authorization"] = `Bearer ${ROBLOX_TOKEN}`;
+    }
+
+    const userResp = await fetch(`${ROBLOX_USERS_API}/${userId}`, { headers });
     if (userResp.status === 404) return { success: false, reason: "user_not_found" };
     if (!userResp.ok)           return { success: false, reason: `user_${userResp.status}` };
     const { name: username } = await userResp.json();
@@ -97,7 +107,7 @@ async function attemptFetch(userId) {
     do {
       const url  = `${ROBLOX_BADGES_API}/${userId}/badges?limit=100&sortOrder=Asc` +
                    (cursor ? `&cursor=${encodeURIComponent(cursor)}` : "");
-      const resp = await fetch(url, { headers: { Accept: "application/json" } });
+      const resp = await fetch(url, { headers });
 
       if (resp.status === 403 || resp.status === 401)
         return { success: false, reason: "private" };
@@ -127,12 +137,19 @@ async function fetchGamepasses(userId) {
   let lastId = null;
   let pages  = 0;
 
+  const headers = { Accept: "application/json" };
+  
+  // ✅ Добавляем Roblox токен если есть
+  if (ROBLOX_TOKEN) {
+    headers["Authorization"] = `Bearer ${ROBLOX_TOKEN}`;
+  }
+
   try {
     do {
       let url = `https://apis.roblox.com/game-passes/v1/users/${userId}/game-passes?count=100`;
       if (lastId) url += `&exclusiveStartId=${lastId}`;
 
-      const resp = await fetch(url, { headers: { Accept: "application/json" } });
+      const resp = await fetch(url, { headers });
 
       if (!resp.ok) {
         console.log(`Gamepasses fetch failed: ${resp.status}`);
