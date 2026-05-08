@@ -8,10 +8,29 @@ const ROBLOX_USERS_API  = "https://users.roblox.com/v1/users";
 const RETRY_INTERVAL_MS = 5000;
 const MAX_RUNTIME_MS    = 270000;
 
-function robloxHeaders() {
+let csrfToken = null;
+
+function robloxHeaders(withCsrf = false) {
   const h = { Accept: "application/json" };
   if (ROBLOSECURITY) h["Cookie"] = `.ROBLOSECURITY=${ROBLOSECURITY}`;
+  if (withCsrf && csrfToken) h["x-csrf-token"] = csrfToken;
   return h;
+}
+
+async function fetchCsrfToken() {
+  try {
+    const resp = await fetch("https://auth.roblox.com/v2/logout", {
+      method: "POST",
+      headers: { "Cookie": `.ROBLOSECURITY=${ROBLOSECURITY}` }
+    });
+    const token = resp.headers.get("x-csrf-token");
+    if (token) {
+      csrfToken = token;
+      console.log("CSRF token obtained");
+    }
+  } catch (err) {
+    console.log(`CSRF fetch error: ${err}`);
+  }
 }
 
 async function main() {
@@ -21,6 +40,8 @@ async function main() {
   }
 
   console.log(`Scanning player: ${USER_ID}`);
+
+  if (ROBLOSECURITY) await fetchCsrfToken();
 
   const existing = await kvGet(`badges:${USER_ID}`);
   if (existing?.status === "done" && existing.badges.length > 0) {
