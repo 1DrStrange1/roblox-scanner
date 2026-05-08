@@ -9,33 +9,13 @@ const ROBLOX_USERS_API  = "https://users.roblox.com/v1/users";
 const RETRY_INTERVAL_MS = 5000;
 const MAX_RUNTIME_MS    = 270000;
 
-// ДОБАВЛЕНО: диагностика env
-function checkEnv() {
-  const missing = [];
-
-  if (!USER_ID) missing.push("ROBLOX_USER_ID");
-  if (!CF_KV_URL) missing.push("CF_KV_URL");
-  if (!CF_TOKEN) missing.push("CF_TOKEN");
-  if (!WORKER_URL) missing.push("WORKER_URL");
-  if (!PROXY_KEY) missing.push("PROXY_KEY");
-
-  if (missing.length > 0) {
-    console.error("❌ Missing environment variables:");
-    for (const m of missing) console.error(" - " + m);
-    console.error("\n👉 Add them in GitHub Secrets / Actions env.");
-    process.exit(1);
-  }
-
-  console.log("✅ All environment variables loaded");
-}
-
 // Все запросы к Roblox идут через Cloudflare Worker (обходит блокировку IP)
 async function robloxFetch(url) {
   const resp = await fetch(`${WORKER_URL}/proxy`, {
-    method: "POST",
+    method:  "POST",
     headers: {
-      "Content-Type": "application/json",
-      "x-proxy-key": PROXY_KEY
+      "Content-Type":  "application/json",
+      "x-proxy-key":   PROXY_KEY
     },
     body: JSON.stringify({ url })
   });
@@ -43,7 +23,10 @@ async function robloxFetch(url) {
 }
 
 async function main() {
-  checkEnv(); // <-- ДОБАВЛЕНО
+  if (!USER_ID || !CF_KV_URL || !CF_TOKEN || !WORKER_URL || !PROXY_KEY) {
+    console.error("Missing environment variables. Check GitHub Secrets.");
+    process.exit(1);
+  }
 
   console.log(`Scanning player: ${USER_ID}`);
 
@@ -67,25 +50,24 @@ async function main() {
       console.log(`Found ${result.badges.length} badges for ${result.username}`);
 
       await kvPut(`badges:${USER_ID}`, {
-        status: "done",
+        status:    "done",
         scannedAt: new Date().toISOString(),
-        userId: USER_ID,
-        username: result.username,
-        badges: result.badges,
+        userId:    USER_ID,
+        username:  result.username,
+        badges:    result.badges,
         gamepasses: []
       });
-
       console.log("Badges saved. Now scanning gamepasses...");
 
       const gamepasses = await fetchGamepasses(USER_ID);
       console.log(`Found ${gamepasses.length} gamepasses`);
 
       await kvPut(`badges:${USER_ID}`, {
-        status: "done",
+        status:    "done",
         scannedAt: new Date().toISOString(),
-        userId: USER_ID,
-        username: result.username,
-        badges: result.badges,
+        userId:    USER_ID,
+        username:  result.username,
+        badges:    result.badges,
         gamepasses
       });
 
@@ -116,17 +98,15 @@ async function attemptFetch(userId) {
   try {
     const userResp = await robloxFetch(`${ROBLOX_USERS_API}/${userId}`);
     if (userResp.status === 404) return { success: false, reason: "user_not_found" };
-    if (!userResp.ok) return { success: false, reason: `user_${userResp.status}` };
-
+    if (!userResp.ok)           return { success: false, reason: `user_${userResp.status}` };
     const { name: username } = await userResp.json();
 
     const badges = [];
     let cursor = "", pages = 0;
 
     do {
-      const url = `${ROBLOX_BADGES_API}/${userId}/badges?limit=100&sortOrder=Asc` +
-        (cursor ? `&cursor=${encodeURIComponent(cursor)}` : "");
-
+      const url  = `${ROBLOX_BADGES_API}/${userId}/badges?limit=100&sortOrder=Asc` +
+                   (cursor ? `&cursor=${encodeURIComponent(cursor)}` : "");
       const resp = await robloxFetch(url);
 
       if (resp.status === 403 || resp.status === 401)
@@ -135,21 +115,18 @@ async function attemptFetch(userId) {
         return { success: false, reason: `badges_${resp.status}` };
 
       const page = await resp.json();
-
       for (const b of (page.data || [])) {
         badges.push({
-          id: b.id,
-          name: b.name,
+          id:     b.id,
+          name:   b.name,
           gameId: b.awarder?.id || null
         });
       }
-
       cursor = page.nextPageCursor || "";
       pages++;
     } while (cursor && pages < 100);
 
     return { success: true, username, badges };
-
   } catch (err) {
     return { success: false, reason: "network_error", detail: String(err) };
   }
@@ -158,7 +135,7 @@ async function attemptFetch(userId) {
 async function fetchGamepasses(userId) {
   const gamepasses = [];
   let lastId = null;
-  let pages = 0;
+  let pages  = 0;
 
   try {
     do {
@@ -179,21 +156,18 @@ async function fetchGamepasses(userId) {
 
       for (const g of items) {
         gamepasses.push({
-          id: g.gamePassId,
-          name: g.name,
-          creatorId: g.creator?.creatorId || null,
-          creatorName: g.creator?.name || null,
+          id:          g.gamePassId,
+          name:        g.name,
+          creatorId:   g.creator?.creatorId   || null,
+          creatorName: g.creator?.name        || null,
           creatorType: g.creator?.creatorType || null
         });
       }
 
       lastId = items[items.length - 1].gamePassId;
       pages++;
-
       if (items.length < 100) break;
-
     } while (pages < 100);
-
   } catch (err) {
     console.log(`Gamepasses error: ${err}`);
   }
@@ -214,32 +188,24 @@ async function kvGet(key) {
 async function kvPut(key, value) {
   try {
     const resp = await fetch(`${CF_KV_URL}/values/${encodeURIComponent(key)}`, {
-      method: "PUT",
-      headers: {
-        Authorization: `Bearer ${CF_TOKEN}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(value)
+      method:  "PUT",
+      headers: { Authorization: `Bearer ${CF_TOKEN}`, "Content-Type": "application/json" },
+      body:    JSON.stringify(value)
     });
-
     if (!resp.ok) console.error(`KV PUT error: ${await resp.text()}`);
-  } catch (err) {
-    console.error(`KV PUT exception: ${err}`);
-  }
+  } catch (err) { console.error(`KV PUT exception: ${err}`); }
 }
 
 async function kvDelete(key) {
   try {
     await fetch(`${CF_KV_URL}/values/${encodeURIComponent(key)}`, {
-      method: "DELETE",
+      method:  "DELETE",
       headers: { Authorization: `Bearer ${CF_TOKEN}` }
     });
   } catch {}
 }
 
-function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 main().catch(err => {
   console.error("Unexpected error:", err);
