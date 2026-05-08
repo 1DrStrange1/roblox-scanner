@@ -1,47 +1,34 @@
-const USER_ID      = process.env.ROBLOX_USER_ID;
-const CF_KV_URL    = process.env.CF_KV_URL;
-const CF_TOKEN     = process.env.CF_TOKEN;
-const ROBLOSECURITY = process.env.ROBLOSECURITY;
+const USER_ID    = process.env.ROBLOX_USER_ID;
+const CF_KV_URL  = process.env.CF_KV_URL;
+const CF_TOKEN   = process.env.CF_TOKEN;
+const WORKER_URL = process.env.WORKER_URL;
+const PROXY_KEY  = process.env.PROXY_KEY;
 
 const ROBLOX_BADGES_API = "https://badges.roblox.com/v1/users";
 const ROBLOX_USERS_API  = "https://users.roblox.com/v1/users";
 const RETRY_INTERVAL_MS = 5000;
 const MAX_RUNTIME_MS    = 270000;
 
-let csrfToken = null;
-
-function robloxHeaders(withCsrf = false) {
-  const h = { Accept: "application/json" };
-  if (ROBLOSECURITY) h["Cookie"] = `.ROBLOSECURITY=${ROBLOSECURITY}`;
-  if (withCsrf && csrfToken) h["x-csrf-token"] = csrfToken;
-  return h;
-}
-
-async function fetchCsrfToken() {
-  try {
-    const resp = await fetch("https://auth.roblox.com/v2/logout", {
-      method: "POST",
-      headers: { "Cookie": `.ROBLOSECURITY=${ROBLOSECURITY}` }
-    });
-    const token = resp.headers.get("x-csrf-token");
-    if (token) {
-      csrfToken = token;
-      console.log("CSRF token obtained");
-    }
-  } catch (err) {
-    console.log(`CSRF fetch error: ${err}`);
-  }
+// Все запросы к Roblox идут через Cloudflare Worker (обходит блокировку IP)
+async function robloxFetch(url) {
+  const resp = await fetch(`${WORKER_URL}/proxy`, {
+    method:  "POST",
+    headers: {
+      "Content-Type":  "application/json",
+      "x-proxy-key":   PROXY_KEY
+    },
+    body: JSON.stringify({ url })
+  });
+  return resp;
 }
 
 async function main() {
-  if (!USER_ID || !CF_KV_URL || !CF_TOKEN) {
+  if (!USER_ID || !CF_KV_URL || !CF_TOKEN || !WORKER_URL || !PROXY_KEY) {
     console.error("Missing environment variables. Check GitHub Secrets.");
     process.exit(1);
   }
 
   console.log(`Scanning player: ${USER_ID}`);
-
-  if (ROBLOSECURITY) await fetchCsrfToken();
 
   const existing = await kvGet(`badges:${USER_ID}`);
   if (existing?.status === "done" && existing.badges.length > 0) {
@@ -109,9 +96,7 @@ async function main() {
 
 async function attemptFetch(userId) {
   try {
-    const userResp = await fetch(`${ROBLOX_USERS_API}/${userId}`, {
-      headers: robloxHeaders()
-    });
+    const userResp = await robloxFetch(`${ROBLOX_USERS_API}/${userId}`);
     if (userResp.status === 404) return { success: false, reason: "user_not_found" };
     if (!userResp.ok)           return { success: false, reason: `user_${userResp.status}` };
     const { name: username } = await userResp.json();
@@ -122,16 +107,14 @@ async function attemptFetch(userId) {
     do {
       const url  = `${ROBLOX_BADGES_API}/${userId}/badges?limit=100&sortOrder=Asc` +
                    (cursor ? `&cursor=${encodeURIComponent(cursor)}` : "");
-      const resp = await fetch(url, { headers: robloxHeaders() });
+      const resp = await robloxFetch(url);
 
-      console.log(`Badges API status: ${resp.status}`);
       if (resp.status === 403 || resp.status === 401)
         return { success: false, reason: "private" };
       if (!resp.ok)
         return { success: false, reason: `badges_${resp.status}` };
 
       const page = await resp.json();
-      console.log(`Page data count: ${(page.data || []).length}, nextCursor: ${page.nextPageCursor || 'none'}`);
       for (const b of (page.data || [])) {
         badges.push({
           id:     b.id,
@@ -159,7 +142,7 @@ async function fetchGamepasses(userId) {
       let url = `https://apis.roblox.com/game-passes/v1/users/${userId}/game-passes?count=100`;
       if (lastId) url += `&exclusiveStartId=${lastId}`;
 
-      const resp = await fetch(url, { headers: robloxHeaders() });
+      const resp = await robloxFetch(url);
 
       if (!resp.ok) {
         console.log(`Gamepasses fetch failed: ${resp.status}`);
