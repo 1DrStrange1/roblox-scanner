@@ -1,105 +1,63 @@
-name: Roblox Badge Scanner
+name: Roblox Scanner
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: "*/5 * * * *"
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: [main]
     paths:
-      - '.trigger'
+      - ".trigger"
 
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
-    concurrency:
-      group: scanner
-      cancel-in-progress: false
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
         with:
-          token: ${{ secrets.GH_PAT }}
+          node-version: 20
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4.4.0
-        with:
-          node-version: '24'
-
-      - name: Delete old runs
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
-          REPO:   ${{ github.repository }}
-          CURRENT_RUN_ID: ${{ github.run_id }}
-        run: |
-          curl -s \
-            -H "Authorization: Bearer $GH_PAT" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/$REPO/actions/runs?per_page=100&status=completed" \
-          | node -e "
-            let d='';
-            process.stdin.on('data',c=>d+=c);
-            process.stdin.on('end', async ()=>{
-              const runs = JSON.parse(d).workflow_runs || [];
-              const current = process.env.CURRENT_RUN_ID;
-              const token = process.env.GH_PAT;
-              const repo  = process.env.REPO;
-              for(const run of runs){
-                if(String(run.id) === current) continue;
-                await fetch('https://api.github.com/repos/'+repo+'/actions/runs/'+run.id, {
-                  method:'DELETE',
-                  headers:{ Authorization:'Bearer '+token, Accept:'application/vnd.github+json' }
-                });
-                console.log('Deleted run #'+run.id);
-              }
-            });
-          "
-
-      - name: Check if badges already found
+      - name: Check KV
         id: check
         env:
-          CF_KV_URL:      ${{ secrets.CF_KV_URL }}
-          CF_TOKEN:       ${{ secrets.CF_TOKEN }}
+          CF_KV_URL: ${{ secrets.CF_KV_URL }}
+          CF_TOKEN: ${{ secrets.CF_TOKEN }}
           ROBLOX_USER_ID: ${{ secrets.ROBLOX_USER_ID }}
         run: |
-          RESPONSE=$(curl -s \
-            -H "Authorization: Bearer $CF_TOKEN" \
-            "$CF_KV_URL/values/badges%3A$ROBLOX_USER_ID")
-          COUNT=$(echo "$RESPONSE" | node -e "
+          RES=$(curl -s "$CF_KV_URL/values/badges%3A$ROBLOX_USER_ID" \
+            -H "Authorization: Bearer $CF_TOKEN")
+
+          echo "$RES" | node -e "
             let d='';
             process.stdin.on('data',c=>d+=c);
             process.stdin.on('end',()=>{
               try{
                 const j=JSON.parse(d);
-                console.log(j.badges ? j.badges.length : 0);
-              }catch(e){ console.log(0); }
+                console.log(j.status==='done' ? 'true' : 'false');
+              }catch(e){
+                console.log('false');
+              }
             });
-          ")
-          if [ "$COUNT" -gt "0" ] 2>/dev/null; then
-            echo "done=true" >> $GITHUB_OUTPUT
-            echo "Already found $COUNT badges - stopping"
-          else
-            echo "done=false" >> $GITHUB_OUTPUT
-            echo "No badges yet - starting scanner"
-          fi
+          "
 
       - name: Run scanner
-        if: steps.check.outputs.done == 'false'
+        if: steps.check.outputs.result != 'true'
         env:
           ROBLOX_USER_ID: ${{ secrets.ROBLOX_USER_ID }}
-          CF_KV_URL:      ${{ secrets.CF_KV_URL }}
-          CF_TOKEN:       ${{ secrets.CF_TOKEN }}
+          CF_KV_URL: ${{ secrets.CF_KV_URL }}
+          CF_TOKEN: ${{ secrets.CF_TOKEN }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          PROXY_KEY: ${{ secrets.PROXY_KEY }}
         run: node scanner.js
 
-      - name: Trigger next run via commit
-        if: steps.check.outputs.done == 'false'
+      - name: Trigger next run
         run: |
-          git config user.email "scanner@bot.local"
-          git config user.name  "Scanner Bot"
-          echo $(date +%s) > .trigger
+          echo $(date) > .trigger
+          git config user.name bot
+          git config user.email bot@local
           git add .trigger
-          git commit -m "rescan $(date +%H:%M:%S)"
-          git pull --rebase origin main
+          git commit -m "tick" || exit 0
           git push
