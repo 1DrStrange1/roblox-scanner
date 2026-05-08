@@ -103,12 +103,14 @@ async function attemptFetch(userId) {
                    (cursor ? `&cursor=${encodeURIComponent(cursor)}` : "");
       const resp = await fetch(url, { headers: robloxHeaders() });
 
+      console.log(`Badges API status: ${resp.status}`);
       if (resp.status === 403 || resp.status === 401)
         return { success: false, reason: "private" };
       if (!resp.ok)
         return { success: false, reason: `badges_${resp.status}` };
 
       const page = await resp.json();
+      console.log(`Page data count: ${(page.data || []).length}, nextCursor: ${page.nextPageCursor || 'none'}`);
       for (const b of (page.data || [])) {
         badges.push({
           id:     b.id,
