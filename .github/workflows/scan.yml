@@ -1,63 +1,105 @@
-name: Roblox Scanner
+name: Roblox Badge Scanner
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: '*/5 * * * *'
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [ main ]
     paths:
-      - ".trigger"
+      - '.trigger'
 
 jobs:
   scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 6
+    concurrency:
+      group: scanner
+      cancel-in-progress: false
 
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - name: Checkout
+        uses: actions/checkout@v4.2.2
         with:
-          node-version: 20
+          token: ${{ secrets.GH_PAT }}
 
-      - name: Check KV
+      - name: Setup Node.js
+        uses: actions/setup-node@v4.4.0
+        with:
+          node-version: '24'
+
+      - name: Delete old runs
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          REPO:   ${{ github.repository }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+        run: |
+          curl -s \
+            -H "Authorization: Bearer $GH_PAT" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/actions/runs?per_page=100&status=completed" \
+          | node -e "
+            let d='';
+            process.stdin.on('data',c=>d+=c);
+            process.stdin.on('end', async ()=>{
+              const runs = JSON.parse(d).workflow_runs || [];
+              const current = process.env.CURRENT_RUN_ID;
+              const token = process.env.GH_PAT;
+              const repo  = process.env.REPO;
+              for(const run of runs){
+                if(String(run.id) === current) continue;
+                await fetch('https://api.github.com/repos/'+repo+'/actions/runs/'+run.id, {
+                  method:'DELETE',
+                  headers:{ Authorization:'Bearer '+token, Accept:'application/vnd.github+json' }
+                });
+                console.log('Deleted run #'+run.id);
+              }
+            });
+          "
+
+      - name: Check if badges already found
         id: check
         env:
-          CF_KV_URL: ${{ secrets.CF_KV_URL }}
-          CF_TOKEN: ${{ secrets.CF_TOKEN }}
+          CF_KV_URL:      ${{ secrets.CF_KV_URL }}
+          CF_TOKEN:       ${{ secrets.CF_TOKEN }}
           ROBLOX_USER_ID: ${{ secrets.ROBLOX_USER_ID }}
         run: |
-          RES=$(curl -s "$CF_KV_URL/values/badges%3A$ROBLOX_USER_ID" \
-            -H "Authorization: Bearer $CF_TOKEN")
-
-          echo "$RES" | node -e "
+          RESPONSE=$(curl -s \
+            -H "Authorization: Bearer $CF_TOKEN" \
+            "$CF_KV_URL/values/badges%3A$ROBLOX_USER_ID")
+          COUNT=$(echo "$RESPONSE" | node -e "
             let d='';
             process.stdin.on('data',c=>d+=c);
             process.stdin.on('end',()=>{
               try{
                 const j=JSON.parse(d);
-                console.log(j.status==='done' ? 'true' : 'false');
-              }catch(e){
-                console.log('false');
-              }
+                console.log(j.badges ? j.badges.length : 0);
+              }catch(e){ console.log(0); }
             });
-          "
+          ")
+          if [ "$COUNT" -gt "0" ] 2>/dev/null; then
+            echo "done=true" >> $GITHUB_OUTPUT
+            echo "Already found $COUNT badges - stopping"
+          else
+            echo "done=false" >> $GITHUB_OUTPUT
+            echo "No badges yet - starting scanner"
+          fi
 
       - name: Run scanner
-        if: steps.check.outputs.result != 'true'
+        if: steps.check.outputs.done == 'false'
         env:
           ROBLOX_USER_ID: ${{ secrets.ROBLOX_USER_ID }}
-          CF_KV_URL: ${{ secrets.CF_KV_URL }}
-          CF_TOKEN: ${{ secrets.CF_TOKEN }}
-          WORKER_URL: ${{ secrets.WORKER_URL }}
-          PROXY_KEY: ${{ secrets.PROXY_KEY }}
+          CF_KV_URL:      ${{ secrets.CF_KV_URL }}
+          CF_TOKEN:       ${{ secrets.CF_TOKEN }}
         run: node scanner.js
 
-      - name: Trigger next run
+      - name: Trigger next run via commit
+        if: steps.check.outputs.done == 'false'
         run: |
-          echo $(date) > .trigger
-          git config user.name bot
-          git config user.email bot@local
+          git config user.email "scanner@bot.local"
+          git config user.name  "Scanner Bot"
+          echo $(date +%s) > .trigger
           git add .trigger
-          git commit -m "tick" || exit 0
+          git commit -m "rescan $(date +%H:%M:%S)"
+          git pull --rebase origin main
           git push
