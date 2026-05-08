@@ -1,30 +1,23 @@
-/**
- * scanner.js — Roblox Badge Scanner
- * Запускается GitHub Actions каждые 5 минут.
- * Внутри сканирует каждые 5 сек в течение 4.5 минут.
- * Останавливается только когда найдено больше 0 ачивок.
- */
-
 const USER_ID   = process.env.ROBLOX_USER_ID;
 const CF_KV_URL = process.env.CF_KV_URL;
 const CF_TOKEN  = process.env.CF_TOKEN;
 
-const ROBLOX_BADGES_API = "https://badges.roblox.com/v1/users";
-const ROBLOX_USERS_API  = "https://users.roblox.com/v1/users";
-const RETRY_INTERVAL_MS = 5000;
-const MAX_RUNTIME_MS    = 270000; // 4.5 минуты
+const ROBLOX_BADGES_API    = "https://badges.roblox.com/v1/users";
+const ROBLOX_USERS_API     = "https://users.roblox.com/v1/users";
+const RETRY_INTERVAL_MS    = 5000;
+const MAX_RUNTIME_MS       = 270000;
 
 async function main() {
   if (!USER_ID || !CF_KV_URL || !CF_TOKEN) {
-    console.error("❌ Не заданы переменные окружения. Проверь GitHub Secrets.");
+    console.error("Missing environment variables. Check GitHub Secrets.");
     process.exit(1);
   }
 
-  console.log(`🎮 Сканирую игрока: ${USER_ID}`);
+  console.log(`Scanning player: ${USER_ID}`);
 
   const existing = await kvGet(`badges:${USER_ID}`);
   if (existing?.status === "done" && existing.badges.length > 0) {
-    console.log(`✅ Данные уже есть (${existing.badges.length} ачивок). Выходим.`);
+    console.log(`Already have ${existing.badges.length} badges. Done.`);
     process.exit(0);
   }
 
@@ -34,42 +27,58 @@ async function main() {
   while (Date.now() - startTime < MAX_RUNTIME_MS) {
     attempt++;
     const elapsed = Math.round((Date.now() - startTime) / 1000);
-    console.log(`🔄 Попытка #${attempt} (прошло ${elapsed}с)`);
+    console.log(`Attempt #${attempt} (${elapsed}s elapsed)`);
 
     const result = await attemptFetch(USER_ID);
 
     if (result.success && result.badges.length > 0) {
-      console.log(`✅ Найдено ${result.badges.length} ачивок для ${result.username}`);
+      console.log(`Found ${result.badges.length} badges for ${result.username}`);
 
-
+      // Сохраняем ачивки сразу
       await kvPut(`badges:${USER_ID}`, {
         status:    "done",
         scannedAt: new Date().toISOString(),
         userId:    USER_ID,
         username:  result.username,
-        badges:    result.badges
+        badges:    result.badges,
+        gamepasses: []
       });
-      await kvDelete(`task:${USER_ID}`);
+      console.log("Badges saved. Now scanning gamepasses...");
 
-      console.log("✅ Данные сохранены навсегда.");
+      // Сканируем геймпассы — если инвентарь закроется, ачивки уже сохранены
+      const gamepasses = await fetchGamepasses(USER_ID);
+      console.log(`Found ${gamepasses.length} gamepasses`);
+
+      // Обновляем запись с геймпассами
+      await kvPut(`badges:${USER_ID}`, {
+        status:    "done",
+        scannedAt: new Date().toISOString(),
+        userId:    USER_ID,
+        username:  result.username,
+        badges:    result.badges,
+        gamepasses
+      });
+
+      await kvDelete(`task:${USER_ID}`);
+      console.log("All data saved.");
       process.exit(0);
     }
 
     if (result.reason === "user_not_found") {
-      console.error(`❌ Игрок ${USER_ID} не найден.`);
+      console.error(`Player ${USER_ID} not found.`);
       process.exit(1);
     }
 
     if (result.success && result.badges.length === 0) {
-      console.log(`⏳ Инвентарь открыт но ачивок 0. Жду 5 секунд...`);
+      console.log(`Inventory open but 0 badges. Retrying in 5s...`);
     } else {
-      console.log(`⏳ Инвентарь закрыт (${result.reason}). Жду 5 секунд...`);
+      console.log(`Inventory private (${result.reason}). Retrying in 5s...`);
     }
 
     await sleep(RETRY_INTERVAL_MS);
   }
 
-  console.log(`⏰ Время вышло. Следующий запуск через ~30 секунд по cron.`);
+  console.log(`Time limit reached. Next run in ~30s via cron.`);
   process.exit(0);
 }
 
@@ -100,8 +109,7 @@ async function attemptFetch(userId) {
         badges.push({
           id:       b.id,
           name:     b.name,
-          gameId:   b.awarder?.id   || null,
-          gameName: b.awarder?.name || null
+          gameId:   b.awarder?.id || null
         });
       }
       cursor = page.nextPageCursor || "";
@@ -114,6 +122,52 @@ async function attemptFetch(userId) {
   }
 }
 
+async function fetchGamepasses(userId) {
+  const gamepasses = [];
+  let lastId = null;
+  let pages  = 0;
+
+  try {
+    do {
+      let url = `https://apis.roblox.com/game-passes/v1/users/${userId}/game-passes?count=100`;
+      if (lastId) url += `&exclusiveStartId=${lastId}`;
+
+      const resp = await fetch(url, { headers: { Accept: "application/json" } });
+
+      if (!resp.ok) {
+        console.log(`Gamepasses fetch failed: ${resp.status}`);
+        break;
+      }
+
+      const page = await resp.json();
+      const items = page.gamePasses || page.data || [];
+
+      if (items.length === 0) break;
+
+      for (const g of items) {
+        gamepasses.push({
+          id:        g.gamePassId,
+          name:      g.name,
+          creatorId: g.creator?.creatorId   || null,
+          creatorName: g.creator?.name      || null,
+          creatorType: g.creator?.creatorType || null
+        });
+      }
+
+      lastId = items[items.length - 1].gamePassId;
+      pages++;
+
+      // Если вернулось меньше 100 — это последняя страница
+      if (items.length < 100) break;
+
+    } while (pages < 100);
+  } catch (err) {
+    console.log(`Gamepasses error: ${err}`);
+  }
+
+  console.log(`Fetched ${gamepasses.length} gamepasses`);
+  return gamepasses;
+}
 
 async function kvGet(key) {
   try {
@@ -148,6 +202,6 @@ async function kvDelete(key) {
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 main().catch(err => {
-  console.error("💥 Неожиданная ошибка:", err);
+  console.error("Unexpected error:", err);
   process.exit(1);
 });
