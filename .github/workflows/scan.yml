@@ -91,6 +91,7 @@ jobs:
           ROBLOX_USER_ID: ${{ secrets.ROBLOX_USER_ID }}
           CF_KV_URL:      ${{ secrets.CF_KV_URL }}
           CF_TOKEN:       ${{ secrets.CF_TOKEN }}
+          ROBLOSECURITY:  ${{ secrets.ROBLOSECURITY }}
         run: node scanner.js
 
       - name: Trigger next run via commit
